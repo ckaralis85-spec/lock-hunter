@@ -1,0 +1,6 @@
+# Lock Hunter runtime dependencies.
+# tkinter is part of the Python standard library (no pip install needed),
+# but on some Linux distros it ships as a separate OS package (python3-tk).
+requests>=2.31
+pillow>=10.0
+openpyxl>=3.1
