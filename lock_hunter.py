@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "4.7.2"
+VERSION = "4.7.3"
 
 
 
@@ -515,6 +515,42 @@ def _broaden_lock_name(name):
     return s
 
 
+# Layer-2 catalog overrides (from Ferf's reviewed spreadsheet). LPU packs
+# several distinct locks into one entry in inconsistent ways; these are the
+# entries where the correct search terms can't be derived automatically, so
+# they're specified by hand. Keyed by the FOLDED catalog name (the app builds
+# names identically, so this matches). Value = list of search terms, or None
+# to skip the entry entirely (unsearchable placeholders).
+_CATALOG_OVERRIDES = {
+    'abus mylock / t65al': ['ABUS MyLock', 'ABUS T65AL'],
+    'assa 500 / assa flexcore/flexcore plus': ['ASSA 500', 'ASSA Flexcore', 'ASSA Flexcore Plus'],
+    'avocet abs / era professional cylinder / federal lock u-systems (ucf/uch/ucs/uus)-3100 / thirard federal s / thirard federal 2': ['Avocet ABS', 'ERA Professional Cylinder', 'Federal Lock U-systems 3100', 'Thirard Federal S', 'Thirard Federal 2'],
+    'bison/hyt/lays/qlsy chain key lock': ['Bison Chain Key Lock', 'HYT Chain Key Lock', 'Lays Chain Key Lock', 'Qlsy Chain Key Lock'],
+    'ccl sesamee 900 series': ['CCL Sesamee 900'],
+    'eagle "supr-security" (with shutter)': ['Eagle "Supr-Security"'],
+    'eclipse (any model)': ['Eclipse'],
+    'evva gpi/als': ['EVVA GPI', 'EVVA ALS'],
+    'generic/unknown 1 or 2 lever cabinet lock': ['1 Lever Cabinet lock', '2 lever cabinet lock'],
+    'generic/unknown 3 lever cabinet lock': ['3 Lever Cabinet lock'],
+    'generic/unknown 3 lever mortice lock': ['3 Lever mortice lock'],
+    'generic/unknown 4 lever curtained lock': ['4 lever curtained lock', '4 lever lock'],
+    'generic/unknown 4 lever uncurtained lock': ['4 lever uncurtained lock', '4 lever lock'],
+    'generic/unknown 6 or 7 lever lock': ['6 Lever lock', '7 lever lock'],
+    'generic/unranked lock cylinder': None,
+    'kasp 160 series diskus': ['Kasp 160 Diskus'],
+    'kawaha (any) / magmaus (any)': ['Kawaha', 'Magmaus'],
+    'lips keso (door cylinder) / lips octro': ['LIPS Keso', 'LIPS Octro'],
+    'master lock pro series': ['Master Lock Pro'],
+    'miwa/anker 3800': ['MIWA 3800', 'Anker 3800'],
+    's&g 4544 / s&g 4440 series': ['S&G 4544', 'S&G 4440'],
+    'schlage original commercial/residential': ['Schlage Original Commercial', 'Schlage Original Residential'],
+    'wilka pr100 series / wilka th6 / wilka si6': ['Wilka PR100', 'Wilka TH6', 'Wilka SI6'],
+    'yale y110 series brass padlock': ['Yale Y110 brass padlock'],
+    'yale y120 series brass padlock': ['Yale Y120 brass padlock'],
+    'yuema 750 series / forte enigma': ['Yuema 750', 'Forte Enigma'],
+}
+
+
 def _search_terms(name):
     """Every query to run for one catalog lock name:
       1. the name AS WRITTEN — plus, for slash entries, each individual lock
@@ -525,7 +561,16 @@ def _search_terms(name):
          'Mauer Variator A (70091)' also searches 'Mauer Variator A'.
 
     Deduped, order preserved, with the exact/original terms first so precise
-    matches lead and the broader ones follow."""
+    matches lead and the broader ones follow.
+
+    A hand-curated override (from the reviewed spreadsheet) wins outright for the
+    handful of catalog entries LPU labels ambiguously: it returns the exact
+    search terms, or [] to skip an unsearchable placeholder entirely."""
+    _ov = _CATALOG_OVERRIDES.get(_fold(name))
+    if _ov is not None:
+        return list(_ov)
+    if _ov is None and _fold(name) in _CATALOG_OVERRIDES:
+        return []      # explicit skip (value was None)
     parts = _split_catalog_names(name)
     out, seen = [], set()
 
@@ -700,9 +745,20 @@ def _parse_ebay_search_strict(html):
 
 def _fold(s):
     """Accent- and case-insensitive text for MATCHING only ('Sémag' ->
-    'semag'). Display always keeps the real accented name."""
+    'semag'). Display always keeps the real accented name. Letters that do NOT
+    decompose to ASCII under NFKD (ø, æ, ł, ß, ...) are mapped explicitly
+    first — otherwise NFKD+ascii would strip them entirely and Scandinavian /
+    Polish words like 'nøkkel' or 'kłódka' would fold to 'nkkel' / 'kodka' and
+    never match."""
+    s = str(s or "")
+    for a, b in (("ø", "o"), ("Ø", "o"), ("æ", "ae"), ("Æ", "ae"),
+                 ("œ", "oe"), ("Œ", "oe"), ("ß", "ss"), ("ł", "l"),
+                 ("Ł", "l"), ("đ", "d"), ("Đ", "d"), ("ð", "d"), ("Ð", "d"),
+                 ("þ", "th"), ("Þ", "th"), ("ı", "i")):
+        if a in s:
+            s = s.replace(a, b)
     import unicodedata
-    s = unicodedata.normalize("NFKD", str(s or ""))
+    s = unicodedata.normalize("NFKD", s)
     return s.encode("ascii", "ignore").decode("ascii").lower()
 
 def search_ebay_direct(lock_name, status_cb, deep=False, origin=""):
@@ -852,8 +908,13 @@ def _parse_ebay_api_items(payload, marketplace):
         loc = ""
         il = it.get("itemLocation") or {}
         loc = il.get("country") or ""
+        img = (it.get("image") or {}).get("imageUrl") or ""
+        if not img:
+            ti = it.get("thumbnailImages") or []
+            if ti:
+                img = (ti[0] or {}).get("imageUrl") or ""
         if title and url:
-            out.append((title, price, url.split("?")[0], cond, loc))
+            out.append((title, price, url.split("?")[0], cond, loc, img))
     return out
 
 def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
@@ -902,7 +963,7 @@ def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
             items = _parse_ebay_api_items(r.json(), mkt)
             suffix = _EBAY_MKT_META.get(mkt, ("", ""))[1]
             matched = 0
-            for title, price, url, cond, loc in items:
+            for title, price, url, cond, loc, img in items:
                 if tokens and not all(t in _fold(title) for t in tokens):
                     continue
                 if (_LOCK_CONTEXT_FILTER and not _search_has_lock_word(lock_name)
@@ -917,7 +978,8 @@ def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
                     "condition": cond,
                     "site": "eBay" if not suffix else f"eBay ({suffix})",
                     "url": url, "location": loc, "shipping": "unknown",
-                    "notes": "found via eBay API", "preverified": True,
+                    "notes": "found via eBay API", "image": img,
+                    "preverified": True,
                 })
             status_cb(f"  {mkt}: {len(items)} item(s), {matched} matched")
         except Exception as ex:
@@ -1017,6 +1079,10 @@ _LOCK_CONTEXT_WORDS = {
     # Nordic
     "las", "hanglas", "nyckel", "nokkel", "sylinter", "lukko", "avain",
     "sylinteri", "cylinder",
+    # Nordic additions: Danish/Norwegian key + padlock forms (as they fold),
+    # Finnish padlock, Danish "security lock/cylinder"
+    "nogle", "haengelas", "hengelas", "hanglaas", "riippulukko",
+    "sikkerhedslas", "sikkerhedscylinder", "hengelaas", "kombinasjonslas",
     # Polish / Czech / Slovak / others
     "zamek", "klodka", "klucz", "wkladka", "wkladki", "bebenkowa", "zamok",
     "kljuc", "brava", "lokot", "kilit", "anahtar", "zamki", "cilindar",
@@ -1026,9 +1092,21 @@ _LOCK_CONTEXT_WORDS = {
 # a few short ones need word-boundary care to avoid matching inside other words
 _LOCK_WORDS_STRICT = {"key", "las", "slot", "safe", "cle", "cles", "brava"}
 
+# Cyrillic lock words (Bulgarian/Russian/etc.). _fold() strips Cyrillic to
+# nothing, so these are matched against the RAW title instead. Helps listings
+# that pair a Latin brand ("Ruko") with a Cyrillic description.
+_LOCK_WORDS_CYRILLIC = (
+    "ключалка", "катинар", "цилиндър", "цилиндр", "секрет", "брава",
+    "замок", "замка", "патрон", "заключв", "ключ",
+)
+
 def _has_lock_context(title):
     """True if the title looks like an actual lock/key listing (contains a
     lock-context word in any supported language)."""
+    raw = str(title or "").lower()
+    for w in _LOCK_WORDS_CYRILLIC:      # Cyrillic first (fold would drop it)
+        if w in raw:
+            return True
     tl = _fold(title)
     if not tl:
         return False
@@ -2353,7 +2431,64 @@ _FB_MARKETS = [
     ("Netherlands", "amsterdam"), ("Poland", "warsaw"),
     ("Sweden", "stockholm"), ("Denmark", "copenhagen"),
     ("Bulgaria", "sofia"), ("UK", "london"), ("Italy", "milan"),
+    ("Finland", "helsinki"), ("Switzerland", "zurich"),
 ]
+
+# Origin-aware market selection: instead of hitting all markets every time,
+# pick the lock's likely-origin market (+ neighbours) plus a small always-on
+# core. Fewer, more relevant markets = better coverage of the RIGHT places AND
+# fewer requests per search (lighter on Facebook's rate limit). Keys are the
+# country strings _origin_for_lock returns; values are _FB_MARKETS labels.
+_FB_ORIGIN_PREF = {
+    "Finland": ["Finland", "Sweden", "Denmark"],
+    "Sweden": ["Sweden", "Denmark", "Finland"],
+    "Norway": ["Denmark", "Sweden"],
+    "Denmark": ["Denmark", "Sweden", "Germany"],
+    "Germany": ["Germany", "Netherlands", "Poland"],
+    "Austria": ["Germany", "Switzerland", "Italy"],
+    "Switzerland": ["Switzerland", "Germany", "France", "Italy"],
+    "Italy": ["Italy", "Switzerland", "France"],
+    "France": ["France", "Netherlands", "Switzerland"],
+    "Netherlands": ["Netherlands", "Germany", "France"],
+    "Poland": ["Poland", "Germany"],
+    "Spain": ["France", "Italy"],
+    "Portugal": ["France", "Italy"],
+    "UK": ["UK", "France", "Netherlands"],
+    "USA": ["USA", "UK"],
+    "Israel": ["Germany", "France", "UK"],
+    "Russia": ["Poland", "Bulgaria"],
+    "Ukraine": ["Poland", "Bulgaria"],
+    "Czechia": ["Poland", "Germany"],
+    "Slovakia": ["Poland", "Germany"],
+    "Croatia": ["Italy", "Germany"],
+    "Turkey": ["Bulgaria", "Germany"],
+    "Australia": ["UK", "USA"],
+    "Japan": ["USA", "UK"],
+    "China": ["USA", "UK"],
+}
+_FB_CORE = ["USA", "Germany", "UK"]   # huge markets — anything can surface here
+_FB_MAX_MARKETS = 6
+
+
+def _fb_markets_for(lock_name):
+    """Origin-aware pick of Facebook markets for a lock: its likely-origin
+    market (+ neighbours) plus the always-on core, capped at _FB_MAX_MARKETS.
+    Unknown origin falls back to the busiest general markets. Returns a list of
+    (country_label, city_slug) from _FB_MARKETS."""
+    origin = _origin_for_lock(lock_name)
+    labels = []
+    for part in re.split(r"[/,]", origin or ""):
+        for lbl in _FB_ORIGIN_PREF.get(part.strip(), []):
+            if lbl not in labels:
+                labels.append(lbl)
+    if not labels:   # unknown brand/origin -> busiest general markets
+        labels = ["USA", "Germany", "UK", "France", "Italy", "Netherlands"]
+    for lbl in _FB_CORE:
+        if lbl not in labels:
+            labels.append(lbl)
+    labels = labels[:_FB_MAX_MARKETS]
+    bylabel = {c: (c, s) for c, s in _FB_MARKETS}
+    return [bylabel[l] for l in labels if l in bylabel]
 _FB_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -2366,9 +2501,10 @@ _FB_HEADERS = {
 }
 _FB_TIMEOUT = 30
 # Self-imposed rate limit for the Facebook probe. Facebook's no-login ceiling
-# is ~30-60 requests/hour per IP, and one sweep is ~11 requests, so 3 sweeps/
-# hour (~33 requests) stays safely under. Rolling 60-minute window, persisted
-# so restarting the app can't reset it.
+# is ~30-60 requests/hour per IP. With origin-aware market selection a sweep is
+# now ~6 markets + a warm-up (~7 requests), so 3 sweeps/hour (~21 requests)
+# stays comfortably under. Rolling 60-minute window, persisted so restarting
+# the app can't reset it.
 _FB_MAX_PER_HOUR = 3
 _FB_WINDOW_MIN = 60
 
@@ -2405,6 +2541,21 @@ def _fb_walk_listings(node, out):
             _fb_walk_listings(v, out)
 
 
+def _fb_photo(n):
+    """Best-effort primary photo URL from a Facebook listing JSON node."""
+    for k in ("primary_listing_photo", "primaryListingPhoto"):
+        img = ((n.get(k) or {}).get("image") or {}).get("uri")
+        if img:
+            return img
+    for k in ("listing_photos", "listingPhotos"):
+        lp = n.get(k) or []
+        if isinstance(lp, list) and lp:
+            img = ((lp[0] or {}).get("image") or {}).get("uri")
+            if img:
+                return img
+    return ""
+
+
 def _fb_extract(html):
     """Pull (title, price, url) tuples out of the JSON blobs embedded in a
     logged-out Facebook Marketplace search page. Best-effort / defensive."""
@@ -2437,7 +2588,8 @@ def _fb_extract(html):
                     price = (f"{lp.get('amount')} "
                              f"{lp.get('currency', '')}").strip()
             found[lid] = (title, price,
-                          f"https://www.facebook.com/marketplace/item/{lid}/")
+                          f"https://www.facebook.com/marketplace/item/{lid}/",
+                          _fb_photo(n))
     return list(found.values())
 
 
@@ -2463,7 +2615,8 @@ def search_facebook_marketplace(lock_name, status_cb, throttle=2.5):
                      timeout=_FB_TIMEOUT)
         except Exception:
             pass
-        for i, (country, city) in enumerate(_FB_MARKETS):
+        markets = _fb_markets_for(lock_name)
+        for i, (country, city) in enumerate(markets):
             if i:
                 time.sleep(throttle)   # space requests to stay under FB's limit
             url = (f"https://www.facebook.com/marketplace/{city}/search/"
@@ -2476,7 +2629,7 @@ def search_facebook_marketplace(lock_name, status_cb, throttle=2.5):
                     continue
                 items = _fb_extract(r.text)
                 matched = 0
-                for title, price, link in items:
+                for title, price, link, img in items:
                     if link in seen:
                         continue
                     if tokens and not _match_tokens(title, tokens):
@@ -2494,7 +2647,7 @@ def search_facebook_marketplace(lock_name, status_cb, throttle=2.5):
                         "url": link, "location": country,
                         "shipping": "unknown",
                         "notes": "found via direct Facebook Marketplace search",
-                        "preverified": True,
+                        "image": img, "preverified": True,
                     })
                 status_cb(
                     f"  FB {country}: {len(items)} parsed, {matched} matched")
@@ -2764,6 +2917,12 @@ def init_db():
             _lcols = [r[1] for r in conn.execute(f"PRAGMA table_info({_tbl})")]
             if "seller" not in _lcols:
                 conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN seller TEXT")
+        # 4.7.3: listings carry the listing's own image URL where the source
+        # exposes it (Facebook, eBay) — used for result thumbnails on hover.
+        for _tbl in ("listings", "listing_history"):
+            _lcols = [r[1] for r in conn.execute(f"PRAGMA table_info({_tbl})")]
+            if "image_url" not in _lcols:
+                conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN image_url TEXT")
         conn.execute("""CREATE TABLE IF NOT EXISTS searches(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             lock_name TEXT, condition TEXT, exclude_pickup INTEGER,
@@ -2832,18 +2991,19 @@ def _insert_listing_row(conn, lock_name, it):
             it.get("currency", ""), str(it.get("condition", "")).lower(),
             it.get("site", ""), it.get("url", ""), it.get("location", ""),
             ship, it.get("notes", ""), str(it.get("seller", "") or ""),
+            str(it.get("image", "") or ""),
             datetime.datetime.now().isoformat(timespec="seconds"))
     before = conn.total_changes
     conn.execute(
         "INSERT OR IGNORE INTO listings(lock_name,title,price,currency,"
-        "condition,site,url,location,shipping,notes,seller,found_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", vals)
+        "condition,site,url,location,shipping,notes,seller,image_url,found_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", vals)
     is_new = conn.total_changes > before
     try:
         conn.execute(
             "INSERT OR IGNORE INTO listing_history(lock_name,title,price,"
             "currency,condition,site,url,location,shipping,notes,seller,"
-            "found_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", vals)
+            "image_url,found_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", vals)
     except sqlite3.Error:
         pass   # history is best-effort; never break the live results for it
     return is_new
@@ -5990,6 +6150,16 @@ class LockHunter(tk.Tk):
         # Delete/Backspace also removes the selected result row(s).
         self.tree.bind("<Delete>", lambda _e: self._remove_selected_results())
         self.tree.bind("<BackSpace>", lambda _e: self._remove_selected_results())
+        # Hover thumbnails: preview the listing's photo (or the LPU catalog
+        # image as a fallback) when the cursor rests on a result row.
+        self._thumb_win = None
+        self._thumb_lbl = None
+        self._thumb_img = None
+        self._thumb_cache = {}
+        self._thumb_row = None
+        self._thumb_after = None
+        self.tree.bind("<Motion>", self._thumb_motion, add="+")
+        self.tree.bind("<Leave>", lambda _e: self._thumb_hide(), add="+")
         self.tree.tag_configure("odd", background=self.C_PANEL)
         self.tree.tag_configure("even", background=self.C_FIELD)
         # "Scan in progress…" overlay, shown centered over the table while a
@@ -7745,8 +7915,9 @@ class LockHunter(tk.Tk):
         for row in self.tree.get_children():
             self.tree.delete(row)
         self._row_urls = {}
+        self._row_images = {}
         qy = ("SELECT lock_name,title,price,currency,condition,site,"
-              "location,shipping,found_at,url FROM listings WHERE 1=1")
+              "location,shipping,found_at,url,image_url FROM listings WHERE 1=1")
         params = []
         f = self.filter_var.get().strip()
         if f:
@@ -7769,6 +7940,14 @@ class LockHunter(tk.Tk):
                 " WHERE owner_count IS NOT NULL GROUP BY name"):
             if nm:
                 rarity_by_name[_fold(nm)] = cnt
+        # LPU catalog image per folded name — the fallback thumbnail when a
+        # listing has no image of its own.
+        self._lpu_img_by_name = {}
+        for nm, img in conn.execute(
+                "SELECT name, image_url FROM locks"
+                " WHERE image_url IS NOT NULL AND image_url <> ''"):
+            if nm:
+                self._lpu_img_by_name[_fold(nm)] = img
         conn.close()
 
         usd_on = bool(getattr(self, "usd_var", None) and self.usd_var.get())
@@ -7812,6 +7991,116 @@ class LockHunter(tk.Tk):
             stripe = "even" if i % 2 else "odd"
             iid = self.tree.insert("", "end", values=vals, tags=(stripe,))
             self._row_urls[iid] = rec[9]
+            self._row_images[iid] = (rec[10] or "", rec[0] or "")
+
+    def _thumb_url_for(self, iid):
+        """Image URL for a result row: the listing's own photo if we captured
+        one, else the LPU catalog image for that lock, else ''."""
+        listing_img, name = getattr(self, "_row_images", {}).get(iid, ("", ""))
+        if listing_img:
+            return listing_img
+        return getattr(self, "_lpu_img_by_name", {}).get(_fold(name), "")
+
+    def _thumb_motion(self, evt):
+        iid = self.tree.identify_row(evt.y)
+        if iid == self._thumb_row:
+            return
+        self._thumb_row = iid
+        if self._thumb_after:
+            try:
+                self.after_cancel(self._thumb_after)
+            except Exception:
+                pass
+            self._thumb_after = None
+        if not iid:
+            self._thumb_hide()
+            return
+        xr, yr = evt.x_root + 24, evt.y_root + 16
+        self._thumb_after = self.after(300, lambda: self._thumb_show(iid, xr, yr))
+
+    def _thumb_show(self, iid, xr, yr):
+        if not HAVE_PIL:
+            self._thumb_hide()
+            return
+        if iid != self._thumb_row:
+            return
+        url = self._thumb_url_for(iid)
+        if not url:
+            self._thumb_hide()
+            return
+        self._thumb_ensure_win(xr, yr)
+        cached = self._thumb_cache.get(url)
+        if cached is not None:
+            self._thumb_set(cached)
+            return
+        if self._thumb_lbl:
+            self._thumb_lbl.config(text="loading\u2026", image="")
+        threading.Thread(target=self._thumb_fetch, args=(url, iid),
+                         daemon=True).start()
+
+    def _thumb_fetch(self, url, iid):
+        photo = None
+        try:
+            import io
+            r = requests.get(url, timeout=10,
+                             headers={"User-Agent": _BROWSER_UA})
+            if r.status_code == 200:
+                im = Image.open(io.BytesIO(r.content))
+                im.thumbnail((240, 240))
+                photo = ImageTk.PhotoImage(im)
+        except Exception:
+            photo = None
+
+        def apply():
+            if photo is not None:
+                self._thumb_cache[url] = photo
+            if (self._thumb_row == iid and self._thumb_win is not None
+                    and self._thumb_win.winfo_exists()):
+                if photo is not None:
+                    self._thumb_set(photo)
+                else:
+                    self._thumb_hide()
+        try:
+            self.after(0, apply)
+        except Exception:
+            pass
+
+    def _thumb_ensure_win(self, xr, yr):
+        if self._thumb_win is None or not self._thumb_win.winfo_exists():
+            self._thumb_win = tk.Toplevel(self)
+            self._thumb_win.overrideredirect(True)
+            try:
+                self._thumb_win.attributes("-topmost", True)
+            except Exception:
+                pass
+            self._thumb_lbl = tk.Label(
+                self._thumb_win, bg=self.C_PANEL, fg=self.C_MUTE, bd=1,
+                relief="solid", text="loading\u2026", padx=2, pady=2)
+            self._thumb_lbl.pack()
+        try:
+            self._thumb_win.geometry(f"+{int(xr)}+{int(yr)}")
+            self._thumb_win.deiconify()
+        except Exception:
+            pass
+
+    def _thumb_set(self, photo):
+        if (self._thumb_lbl and self._thumb_win is not None
+                and self._thumb_win.winfo_exists()):
+            self._thumb_img = photo
+            self._thumb_lbl.config(image=photo, text="")
+
+    def _thumb_hide(self):
+        if self._thumb_after:
+            try:
+                self.after_cancel(self._thumb_after)
+            except Exception:
+                pass
+            self._thumb_after = None
+        if self._thumb_win is not None and self._thumb_win.winfo_exists():
+            try:
+                self._thumb_win.withdraw()
+            except Exception:
+                pass
 
     def _open_url(self, _evt):
         sel = self.tree.selection()
