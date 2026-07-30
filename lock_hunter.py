@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "4.7.1"
+VERSION = "4.7.2"
 
 
 
@@ -2333,6 +2333,178 @@ _ORIGIN_NATIVE = {
     "Romania": ["OLX (ro)"],
     "Bulgaria": ["OLX (bg)"],
 }
+
+# ---- Facebook Marketplace (opt-in, single-lock searches only) -------------
+# Facebook has NO public API, but it EMBEDS public Marketplace listing data as
+# JSON inside <script type="application/json"> blobs that it serves to
+# logged-out requests. So we can read it with a plain GET — no login, no
+# browser engine, nothing stored — and walk that JSON for listing nodes.
+# Two hard rules keep this from getting an IP rate-limited by Facebook:
+#   * it runs SEQUENTIALLY and THROTTLED (never in the parallel probe pool), and
+#   * it runs for SINGLE-LOCK searches only (never the Hunt-Wishlist batch).
+# It is best-effort: Facebook rotates its page shape from time to time, so if a
+# parse yields nothing the probe just returns [] like any other site would.
+# Marketplace is location-scoped, so we sweep a short list of major-city
+# markets. Edit _FB_MARKETS to taste — fewer markets = faster + smaller
+# footprint. (City slugs are Facebook's own; adjust if a market stops
+# resolving.)
+_FB_MARKETS = [
+    ("USA", "nyc"), ("Germany", "berlin"), ("France", "paris"),
+    ("Netherlands", "amsterdam"), ("Poland", "warsaw"),
+    ("Sweden", "stockholm"), ("Denmark", "copenhagen"),
+    ("Bulgaria", "sofia"), ("UK", "london"), ("Italy", "milan"),
+]
+_FB_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,*/*;q=0.8"),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none", "Upgrade-Insecure-Requests": "1",
+}
+_FB_TIMEOUT = 30
+# Self-imposed rate limit for the Facebook probe. Facebook's no-login ceiling
+# is ~30-60 requests/hour per IP, and one sweep is ~11 requests, so 3 sweeps/
+# hour (~33 requests) stays safely under. Rolling 60-minute window, persisted
+# so restarting the app can't reset it.
+_FB_MAX_PER_HOUR = 3
+_FB_WINDOW_MIN = 60
+
+
+def _fb_session():
+    """Return (session, using_curl_cffi). Facebook frequently serves a login
+    wall to plain-`requests` traffic because urllib3's TLS fingerprint is
+    recognizably not-a-browser — perfect headers don't fix that. curl_cffi
+    impersonates a real Chrome TLS fingerprint, which is how the no-login
+    scrapers actually get the public SSR JSON back. If curl_cffi isn't
+    installed we fall back to requests (the probe then simply tends to return
+    nothing rather than erroring)."""
+    try:
+        from curl_cffi import requests as _cffi
+        return _cffi.Session(impersonate="chrome"), True
+    except Exception:
+        s = requests.Session()
+        s.headers.update(_FB_HEADERS)
+        return s, False
+
+
+def _fb_walk_listings(node, out):
+    """Recursively collect Marketplace listing nodes from Facebook's embedded
+    JSON. A listing is any dict carrying a 'marketplace_listing_title' plus an
+    'id'. Keying on that field (rather than a fixed path) is what lets this
+    survive Facebook reshuffling the surrounding structure."""
+    if isinstance(node, dict):
+        if node.get("marketplace_listing_title") and node.get("id"):
+            out.append(node)
+        for v in node.values():
+            _fb_walk_listings(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _fb_walk_listings(v, out)
+
+
+def _fb_extract(html):
+    """Pull (title, price, url) tuples out of the JSON blobs embedded in a
+    logged-out Facebook Marketplace search page. Best-effort / defensive."""
+    found = {}
+    for m in re.finditer(
+            r'<script[^>]+type="application/json"[^>]*>(.*?)</script>',
+            html, re.S):
+        blob = m.group(1)
+        if "marketplace_listing_title" not in blob:
+            continue
+        try:
+            data = json.loads(blob)
+        except Exception:
+            continue
+        nodes = []
+        _fb_walk_listings(data, nodes)
+        for n in nodes:
+            lid = str(n.get("id") or "").strip()
+            if not lid or lid in found:
+                continue
+            title = str(n.get("marketplace_listing_title") or "").strip()
+            if not title:
+                continue
+            price = ""
+            lp = n.get("listing_price") or {}
+            if isinstance(lp, dict):
+                price = (lp.get("formatted_amount")
+                         or lp.get("formatted_amount_zeros_stripped") or "")
+                if not price and lp.get("amount"):
+                    price = (f"{lp.get('amount')} "
+                             f"{lp.get('currency', '')}").strip()
+            found[lid] = (title, price,
+                          f"https://www.facebook.com/marketplace/item/{lid}/")
+    return list(found.values())
+
+
+def search_facebook_marketplace(lock_name, status_cb, throttle=2.5):
+    """Opt-in, single-lock-only Facebook Marketplace probe. Sweeps a short list
+    of major-city markets SEQUENTIALLY with a delay between each (Facebook rate-
+    limits bursts from one IP). No login or credentials — it reads the public
+    JSON embedded in the logged-out search page. Best-effort; returns [] on
+    trouble. Result dicts match the other marketplace probes."""
+    import time
+    tokens = [t for t in re.split(r"[^a-z0-9]+", _fold(lock_name)) if len(t) > 1]
+    q = urllib.parse.quote_plus(lock_name.strip())
+    out, seen = [], set()
+    try:
+        sess, tls_ok = _fb_session()
+        if not tls_ok:
+            status_cb("  Facebook: curl_cffi not installed — Facebook may "
+                      "return no results (see note in requirements.txt)")
+        # Warm-up: visit /marketplace/ once so Facebook sees a browser that
+        # browsed first, and so the session picks up any cookies.
+        try:
+            sess.get("https://www.facebook.com/marketplace/",
+                     timeout=_FB_TIMEOUT)
+        except Exception:
+            pass
+        for i, (country, city) in enumerate(_FB_MARKETS):
+            if i:
+                time.sleep(throttle)   # space requests to stay under FB's limit
+            url = (f"https://www.facebook.com/marketplace/{city}/search/"
+                   f"?query={q}")
+            try:
+                status_cb(f"Probing Facebook Marketplace ({country})…")
+                r = sess.get(url, timeout=_FB_TIMEOUT)
+                if r.status_code != 200:
+                    status_cb(f"  FB {country}: HTTP {r.status_code}")
+                    continue
+                items = _fb_extract(r.text)
+                matched = 0
+                for title, price, link in items:
+                    if link in seen:
+                        continue
+                    if tokens and not _match_tokens(title, tokens):
+                        continue
+                    if (_LOCK_CONTEXT_FILTER
+                            and not _search_has_lock_word(lock_name)
+                            and not _has_lock_context(title)):
+                        continue
+                    seen.add(link)
+                    matched += 1
+                    out.append({
+                        "title": title, "price": price, "currency": "",
+                        "condition": "used",
+                        "site": f"Facebook Marketplace ({country})",
+                        "url": link, "location": country,
+                        "shipping": "unknown",
+                        "notes": "found via direct Facebook Marketplace search",
+                        "preverified": True,
+                    })
+                status_cb(
+                    f"  FB {country}: {len(items)} parsed, {matched} matched")
+            except Exception as ex:
+                status_cb(f"  FB {country}: {ex}")
+                continue
+    except Exception as ex:
+        status_cb(f"  Facebook Marketplace: {ex}")
+    return out
+
 
 def run_extra_marketplace_probes(lock_name, status_cb, origin="", deep=False):
     """Run every no-API-key marketplace probe and merge the results, de-duped
@@ -5724,6 +5896,16 @@ class LockHunter(tk.Tk):
             variable=self.lockonly_var,
             command=self._toggle_lock_filter)
         self.lockonly_check.pack(side="left", padx=(0, 18))
+        # Optional Facebook Marketplace search (OFF by default). Reads only
+        # public listings (no login, nothing stored), sweeps ~10 country
+        # markets for the single lock being searched, and runs one market at a
+        # time so it stays polite — so it's slower, and can occasionally find
+        # nothing if Facebook changes their page. Single-lock searches only.
+        self.fb_var = tk.BooleanVar(value=False)
+        self.fb_check = ttk.Checkbutton(
+            opts, text="Also search Facebook Marketplace (public listings, slower)",
+            variable=self.fb_var, command=self._toggle_fb_search)
+        self.fb_check.pack(side="left", padx=(0, 18))
         # LPU Lock Bazaar is always included; kept as hidden state (no checkbox).
         self.bazaar_var = tk.BooleanVar(value=True)
         # Extended search: more web searches + deeper verification (slower).
@@ -6130,6 +6312,59 @@ class LockHunter(tk.Tk):
         global _LOCK_CONTEXT_FILTER
         _LOCK_CONTEXT_FILTER = bool(self.lockonly_var.get())
 
+    def _fb_rate_check(self):
+        """Rolling-window Facebook rate limit. Returns (allowed, wait_minutes,
+        used_this_hour). At most _FB_MAX_PER_HOUR Facebook sweeps per
+        _FB_WINDOW_MIN minutes; timestamps live in cfg so the limit survives
+        an app restart. Prunes expired entries as a side effect."""
+        import time
+        now = time.time()
+        win = _FB_WINDOW_MIN * 60
+        times = [t for t in self.cfg.get("fb_search_times", [])
+                 if isinstance(t, (int, float)) and now - t < win]
+        if len(times) != len(self.cfg.get("fb_search_times", [])):
+            self.cfg["fb_search_times"] = times
+            save_cfg(self.cfg)
+        if len(times) >= _FB_MAX_PER_HOUR:
+            wait = int((min(times) + win - now) // 60) + 1
+            return False, max(1, wait), len(times)
+        return True, 0, len(times)
+
+    def _fb_rate_record(self):
+        """Record that a Facebook sweep is being run now (persisted)."""
+        import time
+        now = time.time()
+        win = _FB_WINDOW_MIN * 60
+        times = [t for t in self.cfg.get("fb_search_times", [])
+                 if isinstance(t, (int, float)) and now - t < win]
+        times.append(now)
+        self.cfg["fb_search_times"] = times
+        save_cfg(self.cfg)
+
+    def _toggle_fb_search(self):
+        """Ticking 'Also search Facebook Marketplace' turns on the optional
+        Facebook sweep. It's public-listings only (no login, nothing stored),
+        but slower and best-effort, so confirm before enabling. Unticking is
+        always fine."""
+        if not self.fb_var.get():
+            return
+        ok = messagebox.askyesno(
+            "Also search Facebook Marketplace?",
+            "This also searches Facebook Marketplace across about 10 country "
+            "markets for the single lock you search.\n\n"
+            "It reads only PUBLIC listings — no Facebook login, and nothing "
+            "about your account is used or stored.\n\n"
+            "Two things to expect: it's SLOWER (Facebook is queried one "
+            "market at a time to stay polite, so it adds up to a minute), and "
+            "because Facebook has no real search feature for other apps, it "
+            "can occasionally return nothing when Facebook changes their "
+            "site.\n\nTo stay within Facebook's limits, this is capped at "
+            f"{_FB_MAX_PER_HOUR} Facebook searches per hour (your other "
+            "searches are unaffected).\n\nTurn on Facebook Marketplace "
+            "search?")
+        if not ok:
+            self.fb_var.set(False)
+
     def _toggle_ai_search(self):
         """Ticking 'Also use AI web search' turns on the optional paid AI
         pass. It spends the user's own Anthropic API credits, so make the
@@ -6325,6 +6560,10 @@ class LockHunter(tk.Tk):
                         except Exception as ex:
                             self.q.put(("status", log(
                                 f"  marketplace error: {ex}")))
+                    # NOTE: Facebook Marketplace is deliberately NOT run in the
+                    # wishlist hunt — it would mean ~10 city requests per lock
+                    # across the whole wishlist, which Facebook would quickly
+                    # rate-limit. Facebook is single-lock-search only.
                     for label, fut in efuts:
                         try:
                             results.extend(fut.result() or [])
@@ -6970,15 +7209,33 @@ class LockHunter(tk.Tk):
         # Condition is always "Both" (the New/Used selector was removed in
         # 4.5.4) — the plumbing still carries it so the AI prompt and the
         # searches log keep their shape.
+        # Facebook is opt-in AND rate-limited (see _fb_rate_check). If the
+        # user is over the hourly limit, run the search WITHOUT Facebook this
+        # time rather than blocking the whole search, and say so.
+        use_fb = bool(self.fb_var.get())
+        if use_fb:
+            allowed, wait, used = self._fb_rate_check()
+            if not allowed:
+                messagebox.showinfo(
+                    "Facebook search limit reached",
+                    f"To stay within Facebook's limits, Lock Hunter runs at "
+                    f"most {_FB_MAX_PER_HOUR} Facebook Marketplace searches "
+                    f"per hour.\n\nYou've used {used}. The next one is "
+                    f"available in about {wait} minute(s).\n\nThis search "
+                    f"will run WITHOUT Facebook Marketplace — everything else "
+                    f"(eBay, marketplaces, Lock Bazaar) runs as normal.")
+                use_fb = False
+            else:
+                self._fb_rate_record()
         args = (self.key_var.get().strip(), lock_name,
                 "Both", self.pickup_var.get(), self.bazaar_var.get(),
                 self.deep_var.get(), belt,
                 sales_map.get(self.sales_var.get(), "Both"),
-                self.ai_var.get())
+                self.ai_var.get(), use_fb)
         threading.Thread(target=self._worker, args=args, daemon=True).start()
 
     def _worker(self, key, lock_name, cond, excl, bazaar, deep=False, belt="",
-                sales="Both", use_ai=True):
+                sales="Both", use_ai=True, use_fb=False):
         started = datetime.datetime.now().isoformat(timespec="seconds")
         conn = None
         sid = None
@@ -7110,6 +7367,20 @@ class LockHunter(tk.Tk):
                     results.extend(fut.result())
             finally:
                 phase_pool.shutdown(wait=False)
+            # Facebook Marketplace: opt-in, SINGLE-LOCK only. Runs ONCE on the
+            # original lock name (never per split-variant), sequential and
+            # throttled inside the probe. Its results are marked preverified,
+            # so verify_listings won't re-fetch them into a login wall.
+            if use_fb:
+                try:
+                    fb = search_facebook_marketplace(lock_name, cb)
+                    if fb:
+                        results.extend(fb)
+                        self.q.put(("status", log(
+                            f"Facebook Marketplace: {len(fb)} candidate(s)")))
+                except Exception as ex:
+                    self.q.put(("status", log(
+                        f"Facebook Marketplace error: {ex}")))
             # Verify each listing URL is live (drops 404/403/ended-eBay etc).
             before = len(results)
             results = verify_listings(

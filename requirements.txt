@@ -4,3 +4,10 @@
 requests>=2.31
 pillow>=10.0
 openpyxl>=3.1
+# Recommended for the optional "Search Facebook Marketplace" feature only.
+# Facebook serves a login wall to plain-requests TLS; curl_cffi impersonates a
+# real browser's TLS fingerprint so the public search page returns its data.
+# If you don't use the Facebook feature you can omit this. (If it complicates
+# the PyInstaller build on your machine, remove it — the app still runs; the
+# Facebook probe just tends to return nothing without it.)
+curl_cffi>=0.7
