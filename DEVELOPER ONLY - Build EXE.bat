@@ -77,6 +77,13 @@ REM requests/pillow/openpyxl are RUNTIME deps that must be bundled into the exe;
 REM pyinstaller does the freezing.
 pip install requests pillow openpyxl pyinstaller >>"%LOG%" 2>&1
 if errorlevel 1 goto :dep_failed
+REM curl_cffi gives every scraping probe (eBay, marketplaces, Facebook) a
+REM real-browser TLS fingerprint so sites serve results instead of bot walls.
+REM Best-effort: if it can't install, keep building - the app still works.
+set "CURLCFFI_OK="
+echo Installing curl_cffi (browser-TLS for reliable searches)...
+pip install curl_cffi >>"%LOG%" 2>&1 && set "CURLCFFI_OK=1"
+if not defined CURLCFFI_OK echo   NOTE: curl_cffi did not install - searches will hit bot walls more often.
 
 echo Cleaning previous build output...
 if exist build rmdir /s /q build
@@ -104,11 +111,14 @@ if exist "assets\lpu_icon.ico" (
 
 echo Building LockHunter.exe (this can take a minute or two)...
 >>"%LOG%" echo --- pyinstaller ---
+set "CURL_OPT="
+if defined CURLCFFI_OK set CURL_OPT=--collect-all curl_cffi
 pyinstaller --onefile --windowed --name LockHunter ^
   %ICON_OPT% ^
   %DATA_OPT% ^
   --hidden-import openpyxl ^
   --hidden-import openpyxl.cell._writer ^
+  %CURL_OPT% ^
   lock_hunter.py >>"%LOG%" 2>&1
 set "PYI_RC=%ERRORLEVEL%"
 

@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "4.7.3"
+VERSION = "4.7.4"
 
 
 
@@ -385,6 +385,8 @@ BRAND_ORIGINS = {
     "bks": "Germany", "dom": "Germany", "abus": "Germany", "burg": "Germany",
     "burg-wächter": "Germany", "ces": "Germany", "evva": "Austria",
     "winkhaus": "Germany", "wilka": "Germany", "zeiss": "Germany",
+    "cawi": "Germany", "wittkopp": "Germany", "carl wittkopp": "Germany",
+    "mauer": "Germany", "kromer safe": "Germany",
     "ikon": "Germany", "kaba": "Switzerland/Germany", "dorma kaba": "Switzerland/Germany",
     "gege": "Austria", "kromer": "Germany", "zi ikon": "Germany",
     "mottura": "Italy", "cisa": "Italy", "iseo": "Italy", "securemme": "Italy",
@@ -694,30 +696,46 @@ def _parse_ebay_search(html):
     return items if items else _parse_ebay_search_loose(html)
 
 def _parse_ebay_search_loose(html):
-    """Layout-agnostic fallback: find /itm/ anchors, take the anchor text (or
-    aria-label) as the title and the nearest following price-looking token."""
+    """Layout-robust fallback. eBay ships several search-result card designs
+    (classic 's-item', newer 'su-card', mobile), and the /itm/ anchor wraps a
+    large block of nested markup — so instead of reading the anchor's own text
+    we find every /itm/<id> link and pull a title + price from the card markup
+    AROUND it, trying the title spots eBay actually uses in order: a heading
+    span, s-item__title, the newer su-styled-text primary line, the product
+    image alt, then aria-label. Item ids are global, so the link is rebuilt
+    canonically from the id."""
     out, seen = [], set()
-    for m in re.finditer(
-            r'<a[^>]+href="(https://www\.ebay\.[^"]*?/itm/(\d+))[^"]*"'
-            r'[^>]*>(.{0,400}?)</a>', html, re.S | re.I):
-        url, iid, inner = m.group(1), m.group(2), m.group(3)
+    title_pats = (
+        r'role="heading"[^>]*>\s*(?:<[^>]+>\s*)*([^<]{3,180})',
+        r's-item__title[^"]*"[^>]*>\s*(?:<span[^>]*>\s*)*([^<]{3,180})',
+        r'su-styled-text[^"]*(?:primary|bold)[^"]*"[^>]*>\s*([^<]{3,180})',
+        r'<img[^>]+alt="([^"]{3,180})"',
+        r'aria-label="([^"]{3,180})"',
+    )
+    for m in re.finditer(r'/itm/(?:[^"/?\s]+/)?(\d{9,})', html):
+        iid = m.group(1)
         if iid in seen:
             continue
-        title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", inner)).strip()
-        if not title:
-            am = re.search(r'aria-label="([^"]{5,200})"', m.group(0))
-            title = am.group(1).strip() if am else ""
+        window = html[max(0, m.start() - 250): m.start() + 2600]
+        title = ""
+        for pat in title_pats:
+            tm = re.search(pat, window, re.I | re.S)
+            if tm:
+                title = tm.group(1)
+                break
+        title = re.sub(r"\s+", " ", title).strip()
         title = re.sub(r"^New Listing\s*", "", title, flags=re.I)
-        title = title.replace("&amp;", "&")
-        if not title or title.lower() == "shop on ebay":
+        title = title.replace("&amp;", "&").replace("&nbsp;", " ").strip()
+        low = title.lower()
+        if not title or low in ("shop on ebay", "new listing") \
+                or low.startswith("opens in a"):
             continue
-        seen.add(iid)
-        tail = html[m.end():m.end() + 500]
         pm = re.search(r'((?:US\s*\$|C\s*\$|AU\s*\$|EUR|GBP|£|€|\$)'
-                       r'\s?\d[\d.,]*)', tail)
+                       r'\s?\d[\d.,]*)', window)
         price = re.sub(r"\s+", " ", pm.group(1)).strip() if pm else ""
-        out.append((title, price, url.split("?")[0]))
-        if len(out) >= 60:
+        seen.add(iid)
+        out.append((title, price, f"https://www.ebay.com/itm/{iid}"))
+        if len(out) >= 120:
             break
     return out
 
@@ -726,7 +744,8 @@ def _parse_ebay_search_strict(html):
     across listings; skips the 'Shop on eBay' placeholder card."""
     out = []
     for chunk in re.split(r'<li[^>]*class="[^"]*s-item', html)[1:]:
-        lm = re.search(r'href="(https://www\.ebay\.[^"]*?/itm/[^"]+)"', chunk)
+        lm = re.search(r'href="(?:(?:https?:)?//www\.ebay\.[a-z.]+)?'
+                       r'/itm/(?:[^"/?]+/)?(\d+)[^"]*"', chunk)
         tm = re.search(r's-item__title[^>]*>(.{0,500}?)</(?:div|h3)>', chunk,
                        re.S)
         pm = re.search(r's-item__price[^>]*>(.{0,160}?)</span>', chunk, re.S)
@@ -738,7 +757,7 @@ def _parse_ebay_search_strict(html):
         title = re.sub(r"^New Listing\s*", "", _txt(tm.group(1)), flags=re.I)
         if not title or title.lower() == "shop on ebay":
             continue
-        url = lm.group(1).split("?")[0]
+        url = f"https://www.ebay.com/itm/{lm.group(1)}"
         price = _txt(pm.group(1)).replace("&nbsp;", " ").strip() if pm else ""
         out.append((title.replace("&amp;", "&"), price, url))
     return out
@@ -761,6 +780,52 @@ def _fold(s):
     s = unicodedata.normalize("NFKD", s)
     return s.encode("ascii", "ignore").decode("ascii").lower()
 
+def _log_diag(msg):
+    """Persist a scrape diagnostic to the saved log (lockhunter.log) so a
+    zero-result eBay/marketplace probe can be diagnosed after the fact —
+    per-probe status_cb messages only reach the live status bar, not the file."""
+    try:
+        log(msg)
+    except Exception:
+        pass
+
+
+def _ebay_session():
+    """A persistent session for eBay scraping. curl_cffi (real Chrome TLS
+    fingerprint) when bundled — plain-requests TLS is a big reason eBay 403s —
+    else a requests session carrying browser headers. Cookies persist across
+    calls on the returned session, which is what the homepage warm-up needs."""
+    try:
+        from curl_cffi import requests as _cffi
+        return _cffi.Session(impersonate="chrome"), True
+    except Exception:
+        s = requests.Session()
+        s.headers.update(_SCRAPE_HEADERS)
+        return s, False
+
+
+def _ebay_get(sess, url, dom):
+    """Fetch an eBay search URL on a warmed session, with headers that look
+    like a same-site navigation from the homepage (Referer + Sec-Fetch), which
+    matters to eBay's bot check. Returns (status, text)."""
+    hdrs = {
+        "Referer": f"https://{dom}/",
+        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                   "image/avif,image/webp,*/*;q=0.8"),
+        "Accept-Language": "en-US,en;q=0.9,de;q=0.7,fr;q=0.6",
+        "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    r = sess.get(url, headers=hdrs, timeout=_FB_TIMEOUT)
+    st = getattr(r, "status_code", 0) or 0
+    try:
+        text = r.text or ""
+    except Exception:
+        text = ""
+    return st, text
+
+
 def search_ebay_direct(lock_name, status_cb, deep=False, origin=""):
     """Probe eBay's own search pages directly (origin-country domain first,
     then global ones) and return listing dicts whose titles match every word
@@ -774,24 +839,72 @@ def search_ebay_direct(lock_name, status_cb, deep=False, origin=""):
         if d not in domains:
             domains.append(d)
     domains = domains[:5 if deep else 3]
-    q = urllib.parse.quote_plus(lock_name.strip())
-    tokens = [t for t in re.split(r"[^a-z0-9]+", _fold(lock_name)) if len(t) > 1]
-    ua = {"User-Agent": _BROWSER_UA, "Accept-Language": "en;q=0.9,*;q=0.5",
-          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
+    # Query variants (brand aliases like CAWI->Wittkopp, size forms, a native
+    # lock word) fire on the FIRST/origin domain — the one most likely to hold
+    # the listing — while the other domains get the exact term only, so recall
+    # goes up without multiplying requests across every country.
+    variants = _query_variants(lock_name, origin, deep)
+    plan = []          # (domain, query_string, is_variant)
+    for i, dom in enumerate(domains):
+        if i == 0:
+            for v in variants:
+                plan.append((dom, v, v != lock_name))
+        else:
+            plan.append((dom, lock_name, False))
+    tokens = _lock_tokens(lock_name)
     out, seen = [], set()
-    for dom in domains:
-        url = f"https://{dom}/sch/i.html?_nkw={q}&_ipg=60"
+    # eBay 403s a cold /sch/ request that carries no session cookies. A real
+    # browser gets those cookies by loading eBay first, so we do the same:
+    # ONE persistent session (browser-TLS via curl_cffi when available), warmed
+    # up on each domain's homepage before its first search. Cookies from the
+    # warm-up ride along on the search requests.
+    sess, _tls = _ebay_session()
+    warmed = set()
+    import time as _time
+    for dom, qstr, is_var in plan:
+        q = urllib.parse.quote_plus(qstr.strip())
+        url = (f"https://{dom}/sch/i.html?_nkw={q}"
+               f"&_ipg={240 if deep else 120}")
         try:
-            status_cb(f"Probing {dom} search directly…")
-            r = requests.get(url, headers=ua, timeout=PROBE_TIMEOUT)
-            if r.status_code != 200:
-                status_cb(f"  {dom}: HTTP {r.status_code} on search page")
+            status_cb(f"Probing {dom} directly"
+                      + (f" ({qstr})…" if is_var else "…"))
+            if dom not in warmed:
+                warmed.add(dom)
+                try:
+                    sess.get(f"https://{dom}/", timeout=_FB_TIMEOUT)
+                    _time.sleep(0.4)
+                except Exception:
+                    pass
+            st, text = _ebay_get(sess, url, dom)
+            # Persistent diagnostic so a zero-result eBay is DEBUGGABLE from the
+            # saved log: status, page size, whether the HTML even carries /itm/
+            # links (if not, it's a wall or a JS-only shell, not a parser bug),
+            # and whether it looks bot-walled.
+            kb = len(text) // 1024
+            has_itm = "/itm/" in text
+            blocked = _looks_blocked(st, text)
+            diag = (f"eBay diag {dom} '{qstr}': HTTP {st or 'none'}, {kb}KB, "
+                    f"itm_links={'yes' if has_itm else 'NO'}, "
+                    f"blocked={'yes' if blocked else 'no'}")
+            if st != 200:
+                _log_diag(diag)
+                status_cb(f"  {dom}: HTTP {st or 'no response'} "
+                          "on search page")
                 continue
-            items = _parse_ebay_search(r.text)
+            items = _parse_ebay_search(text)
+            _log_diag(diag + f", parsed={len(items)}")
+            # If eBay served listings (itm_links=yes) but the parser got none,
+            # dump a cleaned sample of the card markup around the first /itm/
+            # link so the exact structure is visible in the saved log.
+            if not items and has_itm:
+                _im = re.search(r'/itm/\d{9,}', text)
+                if _im:
+                    _s = text[max(0, _im.start() - 400): _im.start() + 700]
+                    _s = re.sub(r"\s+", " ", _s.replace("<", " <"))
+                    _log_diag("eBay markup sample: " + _s[:900])
             matched = 0
             for title, price, link in items:
-                tl = _fold(title)
-                if tokens and not all(t in tl for t in tokens):
+                if tokens and not _match_tokens(title, tokens):
                     continue
                 if (_LOCK_CONTEXT_FILTER and not _search_has_lock_word(lock_name)
                         and not _has_lock_context(title)):
@@ -932,7 +1045,7 @@ def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
         if m not in markets:
             markets.append(m)
     markets = markets[:5 if deep else 3]
-    tokens = [t for t in re.split(r"[^a-z0-9]+", _fold(lock_name)) if len(t) > 1]
+    tokens = _lock_tokens(lock_name)
     limit = 100 if deep else 50
     out, seen = [], set()
     for mkt in markets:
@@ -964,7 +1077,7 @@ def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
             suffix = _EBAY_MKT_META.get(mkt, ("", ""))[1]
             matched = 0
             for title, price, url, cond, loc, img in items:
-                if tokens and not all(t in _fold(title) for t in tokens):
+                if tokens and not _match_tokens(title, tokens):
                     continue
                 if (_LOCK_CONTEXT_FILTER and not _search_has_lock_word(lock_name)
                         and not _has_lock_context(title)):
@@ -997,6 +1110,117 @@ def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
 # in the page (JSON-LD, __NEXT_DATA__, itemprop microdata), falls back to
 # listing-anchor scraping, and ALWAYS degrades to [] on trouble. They may need
 # maintenance when a site changes its markup.
+_SCRAPE_HEADERS = {
+    "User-Agent": _BROWSER_UA,
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,*/*;q=0.8"),
+    "Accept-Language": "en-US,en;q=0.9,de;q=0.7,fr;q=0.7,*;q=0.5",
+    "Referer": "https://www.google.com/",
+    "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "cross-site", "Upgrade-Insecure-Requests": "1",
+}
+
+_BLOCK_PHRASES = (
+    "pardon our interruption", "are you a human", "are you a robot",
+    "captcha", "just a moment", "attention required", "access denied",
+    "unusual traffic", "request blocked", "px-captcha",
+    "challenge-platform", "enable javascript and cookies",
+    "checking your browser",
+)
+
+def _looks_blocked(status, text):
+    """Heuristic: is this response a bot-wall/challenge rather than results?
+    Challenge pages are small; real search pages are big — so the phrase test
+    only applies to short responses, which keeps the word 'captcha' in the
+    footer of a real 100 KB results page from false-positiving."""
+    if status in (403, 407, 429, 503, 509):
+        return True
+    t = text or ""
+    if len(t) < 25000:
+        low = t[:8000].lower()
+        return any(p in low for p in _BLOCK_PHRASES)
+    return False
+
+def _scrape_transports():
+    """Ordered fetch transports for scraping: browser-TLS (curl_cffi,
+    impersonating Chrome's TLS fingerprint) first when bundled — many
+    marketplaces bot-wall plain-requests TLS no matter how good the headers
+    are — then standard requests. Without curl_cffi, a second plain slot
+    still gives transient failures one retry."""
+    out = []
+    try:
+        from curl_cffi import requests as _cffi
+
+        def _tls_get(url, headers, timeout, _c=_cffi):
+            t = timeout[-1] if isinstance(timeout, (tuple, list)) else timeout
+            s = _c.Session(impersonate="chrome")
+            try:
+                return s.get(url, headers=headers, timeout=t or 30)
+            finally:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        out.append(("browser-TLS", _tls_get))
+    except Exception:
+        pass
+
+    def _std_get(url, headers, timeout):
+        r = requests.get(url, headers=headers, timeout=timeout,
+                         allow_redirects=True)
+        try:
+            ct = (r.headers.get("content-type") or "").lower()
+            if "charset" not in ct and \
+                    (r.encoding or "").lower() in ("", "iso-8859-1"):
+                r.encoding = r.apparent_encoding or "utf-8"
+        except Exception:
+            pass
+        return r
+    out.append(("standard", _std_get))
+    if len(out) == 1:
+        out.append(("standard retry", _std_get))
+    return out
+
+def _scrape_get(url, status_cb=lambda s: None, label="", timeout=None,
+                headers=None, attempts=2):
+    """Hardened GET used by every scraping probe. Browser-TLS transport when
+    available, realistic headers, bot-wall detection, and one retry on the
+    alternate transport with a short jittered pause. Returns (status, text);
+    (0, "") only when every attempt errored. A blocked-everywhere fetch still
+    returns the last (status, text) so callers keep their own keep/drop
+    policy (the verifier treats walls as keep-unverified, for instance)."""
+    import time as _time
+    import random as _random
+    hdrs = dict(_SCRAPE_HEADERS)
+    if headers:
+        hdrs.update(headers)
+    to = timeout if timeout is not None else PROBE_TIMEOUT
+    transports = _scrape_transports()[:max(1, attempts)]
+    last = (0, "")
+    for i, (tname, getter) in enumerate(transports):
+        if i:
+            _time.sleep(0.5 + _random.random() * 0.7)
+        try:
+            r = getter(url, hdrs, to)
+        except Exception as ex:
+            status_cb(f"  {label or url[:40]}: {tname} fetch error {ex}")
+            continue
+        st = getattr(r, "status_code", 0) or 0
+        try:
+            text = r.text or ""
+        except Exception:
+            text = ""
+        last = (st, text)
+        if not _looks_blocked(st, text):
+            return last
+        if i + 1 < len(transports):
+            status_cb(f"  {label or url[:40]}: bot-wall via {tname} "
+                      f"(HTTP {st}) — retrying with {transports[i+1][0]}…")
+            continue
+        status_cb(f"  {label or url[:40]}: bot-wall on every transport "
+                  f"(HTTP {st})")
+    return last
+
 _MP_UA = {
     "User-Agent": _BROWSER_UA,
     "Accept-Language": "en;q=0.9,fr;q=0.8,de;q=0.8,*;q=0.5",
@@ -1049,9 +1273,143 @@ def _offer_price(node):
             return f"{p} {cur}".strip()
     return ""
 
+def _norm_sizes(s):
+    """Collapse the many ways sellers write a lock size to ONE canonical form
+    so matching and querying line up. 83/45, 83-45, 83x45, '83 45' and 8345 all
+    become '8345'. Runs on FOLDED text. Only joins a digit group to the NEXT
+    group when doing so is unambiguous (both are pure digit runs separated by a
+    single size delimiter), so real separate numbers aren't fused."""
+    s = re.sub(r'(?<=\d)\s*[/xX\u00d7\u2715-]\s*(?=\d)', '', s)   # 83/45 -> 8345
+    return s
+
+# Brand aliases: every set is a group of names that mean the SAME maker/line.
+# Used two ways — at match time (any alias in the title satisfies that brand
+# token) and at query time (each alias becomes an extra search variant). Keep
+# entries FOLDED (lowercase, no accents) since that's how they're compared.
+_BRAND_ALIASES = [
+    {"mul-t-lock", "mult-lock", "multlock", "mtl", "mul t lock"},
+    {"cawi", "wittkopp", "carl wittkopp"},
+    {"s&g", "s and g", "sargent and greenleaf", "sargent greenleaf", "sng"},
+    {"burg-wachter", "burg wachter", "burgwachter", "burg"},
+    {"zeiss ikon", "zi ikon", "zeiss", "zi"},
+    {"assa abloy", "assa"},
+    {"dorma kaba", "dormakaba", "kaba"},
+    {"corbin russwin", "corbin", "russwin"},
+    {"abloy protec", "abloy protec2", "protec2", "protec 2"},
+    {"emhart", "emha"},
+]
+_ALIAS_INDEX = {}
+for _grp in _BRAND_ALIASES:
+    for _a in _grp:
+        _ALIAS_INDEX.setdefault(_a, set()).update(_grp)
+
+
+def _alias_variants(term):
+    """Yield query variants of a term where a recognized brand alias is
+    swapped for its siblings (e.g. 'Mul-T-Lock C10' -> 'MTL C10'). The longest
+    matching alias phrase wins so multi-word brands substitute cleanly. Capped
+    to keep request counts sane."""
+    low = _fold(term)
+    out = []
+    for alias in sorted(_ALIAS_INDEX, key=len, reverse=True):
+        if alias and alias in low:
+            for sib in _ALIAS_INDEX[alias]:
+                if sib == alias:
+                    continue
+                variant = re.sub(re.escape(alias), sib, low, count=1)
+                variant = re.sub(r"\s+", " ", variant).strip()
+                if variant and variant not in out:
+                    out.append(variant)
+            break
+    return out[:4]
+
+
+_ALIAS_CANON = []      # (alias_phrase, canonical_single_token), longest first
+for _grp in _BRAND_ALIASES:
+    _alnum = [a for a in _grp if a.isalnum()]
+    _canon = min(_alnum or _grp, key=len)
+    _canon = re.sub(r"[^a-z0-9]+", "", _canon) or "x"
+    for _al in _grp:
+        _ALIAS_CANON.append((_al, _canon))
+_ALIAS_CANON.sort(key=lambda p: len(p[0]), reverse=True)
+
+
+def _canon_aliases(folded):
+    """Replace any brand-alias spelling with one canonical token so multi-word
+    brands (Mul-T-Lock -> mtl, Sargent and Greenleaf -> sng) survive being
+    split into tokens. Boundary-guarded so a short canon can't match inside an
+    unrelated word."""
+    for alias, canon in _ALIAS_CANON:
+        folded = re.sub(r'(?<![a-z0-9])' + re.escape(alias) + r'(?![a-z0-9])',
+                        canon, folded)
+    return folded
+
+
+def _lock_tokens(name):
+    """Canonical match tokens for a lock name: accent-folded, brand-aliases
+    canonicalized, sizes glued (83/45 -> 8345), split on non-alphanumerics,
+    single chars dropped. The one place token lists are made, so every probe
+    matches identically."""
+    prepared = _norm_sizes(_canon_aliases(_fold(name)))
+    return [t for t in re.split(r"[^a-z0-9]+", prepared) if len(t) > 1]
+
+
 def _match_tokens(title, tokens):
-    tl = _fold(title)
-    return bool(title) and all(t in tl for t in tokens)
+    """True if EVERY search token appears in the title, size-tolerant and
+    alias-aware: the title is put through the same fold -> canon-alias ->
+    size-glue pipeline as the tokens, so '8345' matches '83/45' and a title
+    saying 'MTL' satisfies a 'Mul-T-Lock' token. Exact-model discipline holds —
+    each token must still be accounted for."""
+    if not title or not tokens:
+        return False
+    tl = _norm_sizes(_canon_aliases(_fold(title)))
+    for tok in tokens:
+        tk = _norm_sizes(_canon_aliases(tok))
+        if tk in tl or tok in tl:
+            continue
+        return False
+    return True
+
+
+def _query_variants(term, origin="", deep=False):
+    """The set of search strings to actually fire for one component: the term
+    as written, brand-alias swaps, and (on origin-native sites) a native-
+    language 'brand + lock word' form so German/French/etc. sellers' titles
+    surface. Deduped (case-insensitively) and capped. The exact term is always
+    first so precise matches lead."""
+    variants = [term]
+    seen = {_fold(term)}
+    for v in _alias_variants(term):
+        if v not in seen:
+            variants.append(v)
+            seen.add(v)
+    # size-glued form: 'ABUS 83/45' also searches 'abus 8345' (eBay treats the
+    # slash form and the glued form as different queries, so both are needed).
+    ns = _norm_sizes(_fold(term))
+    if ns != _fold(term) and ns not in seen:
+        variants.append(ns)
+        seen.add(ns)
+    native = _NATIVE_LOCK_WORD.get(origin)
+    if native:
+        brand = term.split()[0] if term.split() else term
+        cand = f"{brand} {native}"
+        if _fold(cand) not in seen:
+            variants.append(cand)
+            seen.add(_fold(cand))
+    cap = 5 if deep else 4
+    return variants[:cap]
+
+
+# One representative native lock word per origin, for query variants on that
+# origin's own marketplaces (sellers there rarely write English "lock").
+_NATIVE_LOCK_WORD = {
+    "Germany": "schloss", "Austria": "schloss",
+    "Switzerland/Germany": "schloss",
+    "France": "serrure", "Italy": "serratura", "Spain": "cerradura",
+    "Netherlands": "slot", "Poland": "zamek",
+    "Sweden": "las", "Denmark/Sweden": "las", "Norway": "las",
+    "Finland": "lukko",
+}
 
 # Lock-context words across the languages of the marketplaces we probe. A
 # listing whose title contains at least one of these is very likely an actual
@@ -1136,15 +1494,17 @@ def _search_has_lock_word(lock_name):
 def _generic_probe(site_name, url, parse_fn, lock_name, status_cb, note):
     """Fetch one search URL, run its parser, token-filter, shape into listing
     dicts. Best-effort; returns [] on any failure."""
-    tokens = [t for t in re.split(r"[^a-z0-9]+", _fold(lock_name)) if len(t) > 1]
+    tokens = _lock_tokens(lock_name)
     out, seen = [], set()
     try:
         status_cb(f"Probing {site_name} directly…")
-        r = requests.get(url, headers=_MP_UA, timeout=PROBE_TIMEOUT)
-        if r.status_code != 200:
-            status_cb(f"  {site_name}: HTTP {r.status_code} on search page")
+        st, text = _scrape_get(url, status_cb, label=site_name,
+                               headers=_MP_UA)
+        if st != 200:
+            status_cb(f"  {site_name}: HTTP {st or 'no response'} "
+                      "on search page")
             return []
-        items = parse_fn(r.text) or []
+        items = parse_fn(text) or []
         matched = 0
         for title, price, link in items:
             if not link or link in seen:
@@ -2600,7 +2960,7 @@ def search_facebook_marketplace(lock_name, status_cb, throttle=2.5):
     JSON embedded in the logged-out search page. Best-effort; returns [] on
     trouble. Result dicts match the other marketplace probes."""
     import time
-    tokens = [t for t in re.split(r"[^a-z0-9]+", _fold(lock_name)) if len(t) > 1]
+    tokens = _lock_tokens(lock_name)
     q = urllib.parse.quote_plus(lock_name.strip())
     out, seen = [], set()
     try:
@@ -2628,6 +2988,12 @@ def search_facebook_marketplace(lock_name, status_cb, throttle=2.5):
                     status_cb(f"  FB {country}: HTTP {r.status_code}")
                     continue
                 items = _fb_extract(r.text)
+                if not items:
+                    _low = (r.text or "")[:4000].lower()
+                    if "login" in _low or _looks_blocked(r.status_code,
+                                                         r.text):
+                        status_cb(f"  FB {country}: got a login/anti-bot "
+                                  "page instead of listings")
                 matched = 0
                 for title, price, link, img in items:
                     if link in seen:
@@ -3523,7 +3889,7 @@ def search_bazaar_direct(lock_name, status_cb, belt=""):
     if data is None:
         return None
     # tokens from the searched lock name (drop 1-2 char noise)
-    tokens = [t for t in re.split(r"[^a-z0-9]+", _fold(lock_name)) if len(t) > 1]
+    tokens = _lock_tokens(lock_name)
     belt_l = (belt or "").strip().lower()
     out = []
     for e in data:
@@ -3533,7 +3899,7 @@ def search_bazaar_direct(lock_name, status_cb, belt=""):
         model = _bz_model(e)
         lock_text = _fold(f"{make} {model} {_bz_lockname(e)}")
         # every search token must appear in the make+model text
-        if tokens and not all(t in lock_text for t in tokens):
+        if tokens and not _match_tokens(lock_text, tokens):
             continue
         # optional belt filter (e.g. "Brown", "Black 2" -> match on "black")
         if belt_l:
@@ -3577,7 +3943,7 @@ def bazaar_entries_for_lock(lock_name, dbelt, data):
     base_belt = (dbelt or "").split()[0].lower()
     comp_tokens = []
     for comp in _split_catalog_names(lock_name):
-        toks = [t for t in re.split(r"[^a-z0-9]+", _fold(comp)) if len(t) > 1]
+        toks = _lock_tokens(comp)
         if toks:
             comp_tokens.append(toks)
     out = []
@@ -3587,7 +3953,7 @@ def bazaar_entries_for_lock(lock_name, dbelt, data):
         lock_text = _fold(f"{_bz_make(e)} {_bz_model(e)} {_bz_lockname(e)}")
         if not lock_text.strip():
             continue
-        if not any(all(t in lock_text for t in toks) for toks in comp_tokens):
+        if not any(_match_tokens(lock_text, toks) for toks in comp_tokens):
             continue
         if base_belt:
             eb = _bz_belt(e).lower()
@@ -4584,25 +4950,16 @@ def _verify_listing(it, status_cb):
         if tag not in note:
             it["notes"] = (note + "; " + tag).strip("; ").strip()
 
-    try:
-        r = requests.get(url, timeout=25, allow_redirects=True,
-                         headers={"User-Agent": _BROWSER_UA,
-                                  "Accept-Language": "en;q=0.9,*;q=0.5",
-                                  "Accept": "text/html,application/xhtml+xml,"
-                                            "*/*;q=0.8"})
-    except Exception as ex:
-        status_cb(f"  (couldn't verify {url[:60]}: {ex}; keeping)")
+    code, _vbody = _scrape_get(url, lambda _s: None, label="verify",
+                               timeout=25, attempts=1)
+    if code == 0:
+        status_cb(f"  (couldn't verify {url[:60]}; keeping)")
         _tag_unverified()
         return True  # network hiccup — don't punish the listing
-    code = r.status_code
     if code in (404, 410):
         status_cb(f"  dropped (gone, HTTP {code}): {url[:70]}")
         return False
-    body = ""
-    try:
-        body = (r.text or "").lower()
-    except Exception:
-        body = ""
+    body = (_vbody or "").lower()
     # LIVE-SIGNAL FIRST for eBay: a purchase/bid affordance on the page proves
     # the listing is live RIGHT NOW, so it must be kept before the ended/sold
     # markers get a say — live multi-quantity listings carry sold-counters
@@ -6068,10 +6425,10 @@ class LockHunter(tk.Tk):
         self.fb_check.pack(side="left", padx=(0, 18))
         # LPU Lock Bazaar is always included; kept as hidden state (no checkbox).
         self.bazaar_var = tk.BooleanVar(value=True)
-        # Extended search: more web searches + deeper verification (slower).
-        self.deep_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Extended search (slower, more thorough)",
-                        variable=self.deep_var).pack(side="left")
+        # Extended search is now ALWAYS ON (no toggle) — deeper pages, more
+        # query variants, deeper verification. Kept as always-true hidden state
+        # so the rest of the plumbing is unchanged.
+        self.deep_var = tk.BooleanVar(value=True)
         # main row: selected lock + results
         mainrow = tk.Frame(pad, bg=self.C_BG)
         mainrow.pack(fill="both", expand=True, pady=(14, 0))
@@ -6716,17 +7073,17 @@ class LockHunter(tk.Tk):
                         if ebay_api_enabled():
                             efuts.append(("eBay API", phase_pool.submit(
                                 search_ebay_api, comp, cb,
-                                deep=False, origin=origin)))
+                                deep=True, origin=origin)))
                         # eBay scrape
                         efuts.append(("eBay probe", phase_pool.submit(
                             search_ebay_direct, comp, cb,
-                            deep=False, origin=origin)))
+                            deep=True, origin=origin)))
                     for comp in comps:
                         origin = _origin_for_lock(comp)
                         # all no-key marketplace probes
                         try:
                             results.extend(run_extra_marketplace_probes(
-                                comp, cb, origin=origin, deep=False))
+                                comp, cb, origin=origin, deep=True))
                         except Exception as ex:
                             self.q.put(("status", log(
                                 f"  marketplace error: {ex}")))
@@ -7369,8 +7726,7 @@ class LockHunter(tk.Tk):
         self._refresh_table()
         if hasattr(self, "scan_overlay"):
             self.scan_overlay.config(
-                text="Extended scan in progress… (this can take a minute)"
-                if self.deep_var.get() else "Scan in progress…")
+                text="Extended scan in progress… (this can take a minute)")
         self._show_scan_overlay(True)
         belt = self.belt_filter_var.get()
         belt = "" if belt == "All belts" else belt
