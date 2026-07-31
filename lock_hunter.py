@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "4.7.4"
+VERSION = "4.7.5"
 
 
 
@@ -716,7 +716,7 @@ def _parse_ebay_search_loose(html):
         iid = m.group(1)
         if iid in seen:
             continue
-        window = html[max(0, m.start() - 250): m.start() + 2600]
+        window = html[max(0, m.start() - 600): m.start() + 2600]
         title = ""
         for pat in title_pats:
             tm = re.search(pat, window, re.I | re.S)
@@ -734,7 +734,8 @@ def _parse_ebay_search_loose(html):
                        r'\s?\d[\d.,]*)', window)
         price = re.sub(r"\s+", " ", pm.group(1)).strip() if pm else ""
         seen.add(iid)
-        out.append((title, price, f"https://www.ebay.com/itm/{iid}"))
+        img = _first_image_url(window)
+        out.append((title, price, f"https://www.ebay.com/itm/{iid}", img))
         if len(out) >= 120:
             break
     return out
@@ -759,7 +760,8 @@ def _parse_ebay_search_strict(html):
             continue
         url = f"https://www.ebay.com/itm/{lm.group(1)}"
         price = _txt(pm.group(1)).replace("&nbsp;", " ").strip() if pm else ""
-        out.append((title.replace("&amp;", "&"), price, url))
+        img = _first_image_url(chunk)
+        out.append((title.replace("&amp;", "&"), price, url, img))
     return out
 
 def _fold(s):
@@ -892,18 +894,22 @@ def search_ebay_direct(lock_name, status_cb, deep=False, origin=""):
                           "on search page")
                 continue
             items = _parse_ebay_search(text)
-            _log_diag(diag + f", parsed={len(items)}")
-            # If eBay served listings (itm_links=yes) but the parser got none,
-            # dump a cleaned sample of the card markup around the first /itm/
-            # link so the exact structure is visible in the saved log.
-            if not items and has_itm:
+            n_img = sum(1 for it in items if len(it) > 3 and it[3])
+            _log_diag(diag + f", parsed={len(items)}, imgs={n_img}")
+            # If eBay served listings (itm_links=yes) but the parser got no
+            # titles — OR got titles but no photos — dump a cleaned sample of
+            # the card markup around the first /itm/ link so the exact
+            # structure (and image tag) is visible in the saved log.
+            if has_itm and (not items or n_img == 0):
                 _im = re.search(r'/itm/\d{9,}', text)
                 if _im:
-                    _s = text[max(0, _im.start() - 400): _im.start() + 700]
+                    _s = text[max(0, _im.start() - 600): _im.start() + 900]
                     _s = re.sub(r"\s+", " ", _s.replace("<", " <"))
-                    _log_diag("eBay markup sample: " + _s[:900])
+                    _log_diag("eBay markup sample: " + _s[:1100])
             matched = 0
-            for title, price, link in items:
+            for row in items:
+                title, price, link = row[0], row[1], row[2]
+                img = row[3] if len(row) > 3 else ""
                 if tokens and not _match_tokens(title, tokens):
                     continue
                 if (_LOCK_CONTEXT_FILTER and not _search_has_lock_word(lock_name)
@@ -921,7 +927,7 @@ def search_ebay_direct(lock_name, status_cb, deep=False, origin=""):
                     "url": link, "location": "",
                     "shipping": "unknown",
                     "notes": "found via direct eBay search",
-                    "preverified": True,
+                    "image": img, "preverified": True,
                 })
             status_cb(f"  {dom}: {len(items)} result(s) parsed, "
                       f"{matched} matched")
@@ -1262,6 +1268,75 @@ def _jsonld_products(html):
                         stack.append(v)
     return out
 
+_IMG_JUNK = ("sprite", "icon", "logo", "placeholder", "blank", "spacer",
+             "1x1", "pixel", "/svg", ".svg", "loading", "no-image",
+             "noimage", "default", "avatar")
+
+
+def _clean_img_url(u):
+    u = (u or "").strip().replace("&amp;", "&")
+    if u.startswith("//"):
+        u = "https:" + u
+    return u
+
+
+def _first_image_url(window):
+    """Pick the best real photo URL from a chunk of card HTML. Prefers lazy-load
+    attributes (data-src / srcset) since the plain src is often a 1x1 or a
+    base64 placeholder, and filters out sprites, icons, logos and the like."""
+    cands = []
+    for pat in (r'data-(?:src|imgsrc|original|lazy|image|thumb)="([^"]+)"',
+                r'\bsrcset="([^" ,]+)',
+                r'<img[^>]+\bsrc="([^"]+)"',
+                r'"(?:image|imageUrl|thumbnailUrl|img|thumbnail)"\s*:\s*"([^"]+)"'):
+        for m in re.finditer(pat, window, re.I):
+            cands.append(_clean_img_url(m.group(1)))
+    for u in cands:
+        ul = u.lower()
+        if not ul.startswith("http") or u.startswith("data:"):
+            continue
+        if any(b in ul for b in _IMG_JUNK):
+            continue
+        if re.search(r"\.(?:jpe?g|png|webp|avif)(?:[?#]|$)", ul) or \
+                any(w in ul for w in ("/img", "image", "media", "photo",
+                                      "thumb", "/i/", "ebayimg", "static")):
+            return u
+    return ""
+
+
+def _img_near_link(html, link):
+    """Best-effort thumbnail for a listing whose parser didn't supply one: find
+    the listing's href in the page and take the nearest photo in that card.
+    Marketplaces render the image right next to the link, so a tight window
+    around the href position catches the card's own photo without modifying
+    each of the ~46 site parsers."""
+    try:
+        path = re.sub(r"^https?://[^/]+", "", link or "").split("?")[0]
+        idx = -1
+        if len(path) >= 5:
+            idx = html.find(path)
+        if idx < 0:
+            seg = path.rstrip("/").split("/")[-1]
+            if len(seg) >= 5:
+                idx = html.find(seg)
+        if idx < 0:
+            return ""
+        return _first_image_url(html[max(0, idx - 700): idx + 1400])
+    except Exception:
+        return ""
+
+
+def _offer_image(node):
+    """Image URL from a JSON-LD product/offer node (string, list, or an
+    ImageObject dict)."""
+    img = node.get("image") or node.get("thumbnailUrl") or ""
+    if isinstance(img, list) and img:
+        img = img[0]
+    if isinstance(img, dict):
+        img = img.get("url") or img.get("contentUrl") or ""
+    return _clean_img_url(img) if isinstance(img, str) else ""
+
+
 def _offer_price(node):
     off = node.get("offers")
     if isinstance(off, list) and off:
@@ -1460,7 +1535,15 @@ _LOCK_WORDS_CYRILLIC = (
 
 def _has_lock_context(title):
     """True if the title looks like an actual lock/key listing (contains a
-    lock-context word in any supported language)."""
+    lock-context word in any supported language).
+
+    Special case: the word 'safe' IS a lock word (safe locks, vault safes) but
+    it's also the single most common adjective in solar-eclipse-glasses and
+    similar eyewear listings ('100% SAFE', 'Safe for direct sun viewing').
+    So a bare 'safe' only counts when the title does NOT look like eyewear /
+    sun-viewing merchandise; such titles need a real lock word instead.
+    Compounds like 'safe lock' or 'gun safe with key' still pass via their
+    other lock words."""
     raw = str(title or "").lower()
     for w in _LOCK_WORDS_CYRILLIC:      # Cyrillic first (fold would drop it)
         if w in raw:
@@ -1469,16 +1552,27 @@ def _has_lock_context(title):
     if not tl:
         return False
     words = set(re.split(r"[^a-z0-9]+", tl))
+    safe_disqualified = any(j in tl for j in _SAFE_ADJ_JUNK)
     for w in _LOCK_CONTEXT_WORDS:
         if " " in w or "-" in w:
             if w.replace("-", " ") in tl.replace("-", " "):
                 return True
         elif w in _LOCK_WORDS_STRICT:
+            if w in ("safe", "safes") and safe_disqualified:
+                continue            # 'safe' as ad-copy, not a lock
             if w in words:          # exact word only (avoid 'key' in 'monkey')
                 return True
         elif w in words or w in tl:
             return True
     return False
+
+
+# Titles where 'safe' is ad-copy rather than the lock kind: eyewear and
+# sun-viewing merchandise (solar-eclipse glasses being the chronic offender).
+_SAFE_ADJ_JUNK = (
+    "glasses", "sunglass", "eyeglass", "eyewear", "goggle", "spectacle",
+    "shades", "viewer", "viewing", "solar", "lens", "lenses", "filter film",
+)
 
 # Whether the lock-context filter is active. On by default; the UI can toggle
 # it (a checkbox) so the user can loosen filtering if a terse-titled real
@@ -1490,6 +1584,21 @@ def _search_has_lock_word(lock_name):
     typed 'Abloy padlock'), the token match already constrains to locks, so we
     skip the extra context filter to avoid over-dropping."""
     return _has_lock_context(lock_name)
+
+def _sanitize_title(title):
+    """Guard against an embedded JSON/ad payload leaking into a listing title
+    (some marketplaces stash a data blob where the visible title should be,
+    e.g. {"creditText":"Kleinanzeigen","title":"..."}). If the 'title' is
+    actually JSON, pull its human 'title' field; if there isn't one, drop it so
+    a garbage row never reaches the results table."""
+    t = (title or "").strip()
+    looks_json = (t.startswith("{") or t.startswith("[")
+                  or ('"' in t and re.search(r'"\s*:\s*"', t)))
+    if looks_json:
+        jt = re.search(r'"title"\s*:\s*"([^"]{2,})"', t)
+        return jt.group(1).strip() if jt else ""
+    return t
+
 
 def _generic_probe(site_name, url, parse_fn, lock_name, status_cb, note):
     """Fetch one search URL, run its parser, token-filter, shape into listing
@@ -1506,7 +1615,12 @@ def _generic_probe(site_name, url, parse_fn, lock_name, status_cb, note):
             return []
         items = parse_fn(text) or []
         matched = 0
-        for title, price, link in items:
+        for row in items:
+            title, price, link = row[0], row[1], row[2]
+            img = row[3] if len(row) > 3 else ""
+            title = _sanitize_title(title)
+            if not title:
+                continue
             if not link or link in seen:
                 continue
             if tokens and not _match_tokens(title, tokens):
@@ -1520,11 +1634,15 @@ def _generic_probe(site_name, url, parse_fn, lock_name, status_cb, note):
                 continue
             seen.add(link)
             matched += 1
+            # Thumbnail: use the parser's image if it captured one, else find
+            # the listing's own photo in the card markup around its link.
+            if not img:
+                img = _img_near_link(text, link)
             out.append({
                 "title": title.strip(), "price": price, "currency": "",
                 "condition": "used", "site": site_name, "url": link,
                 "location": "", "shipping": "unknown", "notes": note,
-                "preverified": True,
+                "image": img, "preverified": True,
             })
         status_cb(f"  {site_name}: {len(items)} parsed, {matched} matched")
     except Exception as ex:
@@ -5600,10 +5718,16 @@ class LockHunter(tk.Tk):
         style.map("Treeview.Heading",
                   background=[("active", self.C_LINE)],
                   foreground=[("active", self.C_ACCENT)])
-        style.configure("Vertical.TScrollbar", background=self.C_PANEL2,
-                        troughcolor=self.C_BG, arrowcolor=self.C_MUTE,
-                        bordercolor=self.C_BG, relief="flat")
-        style.map("Vertical.TScrollbar", background=[("active", self.C_LINE)])
+        # Scrollbars must be SEEN on the dark theme: a wide bar with a
+        # clearly lighter thumb (amber when hovered/dragged), not the old
+        # panel-on-background camouflage that made them invisible.
+        style.configure("Vertical.TScrollbar", background=self.C_MUTE,
+                        troughcolor=self.C_PANEL, arrowcolor=self.C_TEXT,
+                        bordercolor=self.C_PANEL, relief="flat",
+                        width=16, arrowsize=16)
+        style.map("Vertical.TScrollbar",
+                  background=[("active", self.C_ACCENT),
+                              ("pressed", self.C_ACCENT)])
 
     # ---- UI construction
     def _card(self, parent, title):
@@ -5802,8 +5926,8 @@ class LockHunter(tk.Tk):
             self.compare_tree.column(c, width=w, anchor=anchor, stretch=stretch)
         vs = ttk.Scrollbar(table, orient="vertical", command=self.compare_tree.yview)
         self.compare_tree.configure(yscrollcommand=vs.set)
-        self.compare_tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="right", fill="y")
+        self.compare_tree.pack(side="left", fill="both", expand=True)
         self.compare_tree.tag_configure("odd", background=self.C_PANEL)
         self.compare_tree.tag_configure("even", background=self.C_FIELD)
         self.compare_tree.tag_configure(
@@ -6465,12 +6589,11 @@ class LockHunter(tk.Tk):
         self.filter_var = tk.StringVar()
         fe = ttk.Entry(fstrip, textvariable=self.filter_var, width=22)
         fe.pack(side="left"); fe.bind("<KeyRelease>", lambda *_: self._refresh_table())
+        # Condition dropdown and "Hide non-shippable results" removed in
+        # 4.7.5 — all results always show. Vars kept as inert defaults so any
+        # stray references stay harmless.
         self.dbcond_var = tk.StringVar(value="All")
-        ttk.Combobox(fstrip, textvariable=self.dbcond_var, width=6, state="readonly",
-                     values=["All", "new", "used"]).pack(side="left", padx=6)
         self.dbship_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fstrip, text="Hide non-shippable results", variable=self.dbship_var,
-                        command=self._refresh_table).pack(side="left", padx=4)
         # Optional USD estimate next to foreign prices (live rates, cached 12h)
         self.usd_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(fstrip, text="Show USD estimate", variable=self.usd_var,
@@ -6482,13 +6605,14 @@ class LockHunter(tk.Tk):
 
         table = tk.Frame(results, bg=self.C_PANEL)
         table.pack(fill="both", expand=True)
-        # "Ship" column replaced with "Rarity" in 4.5.8: shipping data is
-        # still collected and still drives the "Hide non-shippable results"
-        # checkbox — it just isn't shown as a column anymore.
-        cols = ("lock", "title", "price", "cond", "site", "loc", "rarity")
-        heads = ("Lock", "Title", "Price", "Cond", "Site", "Location", "Rarity")
+        # "Ship" column replaced with "Rarity" in 4.5.8; the Cond column and
+        # the "Hide non-shippable results" checkbox were removed in 4.7.5 —
+        # shipping/condition data is still collected and stored, just not
+        # displayed or filtered on.
+        cols = ("lock", "title", "price", "site", "loc", "rarity")
+        heads = ("Lock", "Title", "Price", "Site", "Location", "Rarity")
         self.tree = ttk.Treeview(table, columns=cols, show="headings")
-        widths = (150, 330, 95, 52, 105, 105, 64)
+        widths = (150, 360, 95, 110, 110, 64)
         # click a column header to sort: 1st click ascending, 2nd descending,
         # 3rd back to the default order (Bazaar first, newest first)
         self._res_heads = dict(zip(cols, heads))
@@ -6500,8 +6624,8 @@ class LockHunter(tk.Tk):
             self.tree.column(c, width=w, anchor="w")
         vs = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vs.set)
-        self.tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", self._open_url)
         self.tree.bind("<Button-3>", self._results_context_menu)  # right-click
         # Delete/Backspace also removes the selected result row(s).
@@ -6566,15 +6690,15 @@ class LockHunter(tk.Tk):
         self.profile_btn = FlatButton(ctrl, "Update profile",
                                       command=self._start_profile_import, kind="primary")
         self.profile_btn.pack(side="right")
-        # Batch "hunt my whole wishlist" — only enabled when the Show filter is
-        # "My wishlist". Runs the FREE (no-API-credit) search for every lock on
-        # the wishlist (honoring the belt filter). Can take a while and return
-        # a lot — that's expected.
+        # Batch "hunt my whole wishlist" — available from the "All locks" or
+        # "My wishlist" views (it always hunts the WISHLIST regardless of the
+        # view, honoring the belt filter). Runs the FREE (no-API-credit) search
+        # for every wishlist lock. Can take a while and return a lot.
         self.hunt_wishlist_btn = FlatButton(
             ctrl, "Search for Wishlist Locks",
             command=self._toggle_wishlist_hunt, kind="outline")
         self.hunt_wishlist_btn.pack(side="right", padx=(0, 10))
-        self._set_hunt_wishlist_enabled(False)
+        self._sync_hunt_wishlist_button()
         self.locks_count_var = tk.StringVar(value="")
         tk.Label(ctrl, textvariable=self.locks_count_var, bg=self.C_PANEL, fg=self.C_MUTE,
                  font=LF).pack(side="right", padx=(0, 12))
@@ -6613,8 +6737,8 @@ class LockHunter(tk.Tk):
             self.locks_tree.column(c, width=w, anchor=anchor, stretch=stretch)
         vs = ttk.Scrollbar(table, orient="vertical", command=self.locks_tree.yview)
         self.locks_tree.configure(yscrollcommand=vs.set)
-        self.locks_tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="right", fill="y")
+        self.locks_tree.pack(side="left", fill="both", expand=True)
         self.locks_tree.tag_configure("odd", background=self.C_PANEL)
         self.locks_tree.tag_configure("even", background=self.C_FIELD)
         self.locks_tree.bind("<Double-1>", self._locks_open_page)
@@ -6953,7 +7077,7 @@ class LockHunter(tk.Tk):
         btn = getattr(self, "hunt_wishlist_btn", None)
         if btn is not None:
             btn.config(text="Search for Wishlist Locks")
-        on = (self.locks_show_var.get() == "My wishlist"
+        on = (self.locks_show_var.get() in ("All locks", "My wishlist")
               and not getattr(self, "_wishlist_hunt_running", False))
         self._set_hunt_wishlist_enabled(on)
 
@@ -6972,7 +7096,7 @@ class LockHunter(tk.Tk):
         return [r[0] for r in rows if r[0]]
 
     def _start_wishlist_hunt(self):
-        if self.locks_show_var.get() != "My wishlist":
+        if self.locks_show_var.get() not in ("All locks", "My wishlist"):
             return
         if getattr(self, "_wishlist_hunt_running", False):
             return
@@ -8132,8 +8256,8 @@ class LockHunter(tk.Tk):
         """Export the current Search results to an Excel file with columns:
         Lock name, Rarity (stars), Title, Price, Price (USD), Site, Seller
         (the LPU Bazaar username, where the source knows it), and a clickable
-        hyperlink. Honors the same filter/condition/shipping toggles that
-        shape the on-screen table."""
+        hyperlink. Honors the same name filter that shapes the on-screen
+        table (condition/shipping toggles were removed in 4.7.5)."""
         # Pull the same rows the results table shows (same WHERE clauses).
         qy = ("SELECT lock_name,title,price,currency,site,url,seller"
               " FROM listings WHERE 1=1")
@@ -8141,10 +8265,6 @@ class LockHunter(tk.Tk):
         f = self.filter_var.get().strip()
         if f:
             qy += " AND lock_name LIKE ?"; params.append(f"%{f}%")
-        if self.dbcond_var.get() != "All":
-            qy += " AND condition=?"; params.append(self.dbcond_var.get())
-        if self.dbship_var.get():
-            qy += " AND shipping='yes'"
         qy += (" ORDER BY (CASE WHEN site='LPU Lock Bazaar' THEN 0 ELSE 1 END),"
                " found_at DESC LIMIT 5000")
         try:
@@ -8278,10 +8398,6 @@ class LockHunter(tk.Tk):
         f = self.filter_var.get().strip()
         if f:
             qy += " AND lock_name LIKE ?"; params.append(f"%{f}%")
-        if self.dbcond_var.get() != "All":
-            qy += " AND condition=?"; params.append(self.dbcond_var.get())
-        if self.dbship_var.get():
-            qy += " AND shipping='yes'"
         # Default order: LPU Lock Bazaar first, then newest first.
         qy += (" ORDER BY (CASE WHEN site='LPU Lock Bazaar' THEN 0 ELSE 1 END),"
                " found_at DESC LIMIT 500")
@@ -8323,7 +8439,7 @@ class LockHunter(tk.Tk):
                     return amt
                 if self._sort_col == "rarity":
                     return rarity_by_name.get(_fold(rec[0]))
-                idx = {"lock": 0, "title": 1, "cond": 4, "site": 5,
+                idx = {"lock": 0, "title": 1, "site": 5,
                        "loc": 6}[self._sort_col]
                 v = (rec[idx] or "").strip()
                 return v.lower() if v else None
@@ -8342,20 +8458,19 @@ class LockHunter(tk.Tk):
                     price_disp += f"  (~${u:,.0f})"
             fk = _fold(rec[0] or "")
             rar = _rarity_stars(rarity_by_name[fk]) if fk in rarity_by_name else ""
-            vals = (rec[0], rec[1], price_disp, rec[4], rec[5], rec[6],
-                    rar)
+            vals = (rec[0], rec[1], price_disp, rec[5], rec[6], rar)
             stripe = "even" if i % 2 else "odd"
             iid = self.tree.insert("", "end", values=vals, tags=(stripe,))
             self._row_urls[iid] = rec[9]
             self._row_images[iid] = (rec[10] or "", rec[0] or "")
 
     def _thumb_url_for(self, iid):
-        """Image URL for a result row: the listing's own photo if we captured
-        one, else the LPU catalog image for that lock, else ''."""
-        listing_img, name = getattr(self, "_row_images", {}).get(iid, ("", ""))
-        if listing_img:
-            return listing_img
-        return getattr(self, "_lpu_img_by_name", {}).get(_fold(name), "")
+        """Image URL for a result row: ONLY the listing's own captured photo.
+        We deliberately do NOT fall back to the LPU catalog image — that's a
+        reference photo of the model, not the actual item for sale, so it's
+        misleading. No listing photo -> no thumbnail."""
+        listing_img, _name = getattr(self, "_row_images", {}).get(iid, ("", ""))
+        return listing_img or ""
 
     def _thumb_motion(self, evt):
         iid = self.tree.identify_row(evt.y)
