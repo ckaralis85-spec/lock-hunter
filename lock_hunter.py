@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "4.7.7"
+VERSION = "4.7.8"
 
 
 
@@ -6359,15 +6359,17 @@ class LockHunter(tk.Tk):
             return
         # need a wishlist to compare against
         conn = db()
-        n_wish = conn.execute(
-            "SELECT COUNT(*) FROM my_collection WHERE status='wishlist'").fetchone()[0]
+        n_mine = conn.execute(
+            "SELECT COUNT(*) FROM my_collection "
+            "WHERE status IN ('wishlist','own')").fetchone()[0]
         conn.close()
-        if not n_wish:
+        if not n_mine:
             messagebox.showinfo(
                 "Compare",
-                "Your wishlist is empty, so there's nothing to compare against "
-                "yet.\n\nImport your own LPU profile first: go to the Locks "
-                "tab and click \u201cUpdate profile\u201d.")
+                "Your wishlist and owned list are both empty, so there's "
+                "nothing to compare against yet.\n\nImport your own LPU "
+                "profile first: go to the Locks tab and click "
+                "\u201cUpdate profile\u201d.")
             return
         self.compare_btn.config(state="disabled")
         self.compare_btn.config(text="Comparing\u2026")
@@ -6938,7 +6940,7 @@ class LockHunter(tk.Tk):
         self.owners_tree = ttk.Treeview(table, columns=cols, show="headings",
                                         style="Owners.Treeview")
         specs = [("lock", 250, "w", False), ("belt", 78, "w", False),
-                 ("owner", 200, "w", False),
+                 ("rarity", 90, "w", False), ("owner", 200, "w", False),
                  ("owned", 120, "center", False), ("pad", 20, "w", True)]
         for (c, w, anchor, stretch), h in zip(specs, heads):
             self.owners_tree.heading(c, text=h)
@@ -6952,11 +6954,14 @@ class LockHunter(tk.Tk):
         self.owners_tree.tag_configure("ownergrp", background=self.C_SEL,
                                        foreground=self.C_ACCENT)
         self.owners_tree.bind("<Double-1>", self._owners_open_profile)
+        self.owners_tree.bind("<Button-3>", self._owners_context_menu)
         self._owners_profiles = {}
 
         tk.Label(
             body,
             text=("Double-click an owner to open their LPU profile.  "
+                  "Right-click an owner to compare trades — locks they own on "
+                  "your wishlist, and locks YOU own on theirs.  "
                   "Anonymous collectors are shown but can't be opened."),
             bg=self.C_PANEL, fg=self.C_MUTE,
             font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 0))
@@ -7378,6 +7383,55 @@ class LockHunter(tk.Tk):
         if url:
             webbrowser.open(url)
 
+
+    @staticmethod
+    def _owner_name_from_url(url):
+        """Collector display name embedded in a profile link's name= param."""
+        m = re.search(r"[?&]name=([^&]+)", url or "")
+        if not m:
+            return "this collector"
+        return urllib.parse.unquote(m.group(1)).replace("_", " ")
+
+    def _owners_context_menu(self, event):
+        """Right-click on an Owners row: compare trades with that collector,
+        or open their LPU profile. Rows without a public profile (anonymous
+        collectors, the indented lock lines, Bazaar sellers without an LPU
+        match) get an explanatory disabled entry instead."""
+        iid = self.owners_tree.identify_row(event.y)
+        if not iid:
+            return
+        self.owners_tree.selection_set(iid)
+        self.owners_tree.focus(iid)
+        url = self._owners_profiles.get(iid)
+        menu = tk.Menu(self, tearoff=0)
+        if url:
+            who = self._owner_name_from_url(url)
+            menu.add_command(
+                label=f"Compare trades with {who}",
+                command=lambda i=iid: self._owners_compare_row(i))
+            menu.add_separator()
+            menu.add_command(
+                label=f"Open {who}'s LPU profile",
+                command=lambda u=url: webbrowser.open(u))
+        else:
+            menu.add_command(label="No public LPU profile for this row",
+                             state="disabled")
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _owners_compare_row(self, iid):
+        """Run the Compare tab against this collector's profile — the results
+        show BOTH trade directions: locks they own that are on your wishlist,
+        and locks YOU own that are on THEIR wishlist."""
+        url = self._owners_profiles.get(iid)
+        if not url:
+            self.status.set("That row has no public LPU profile to compare.")
+            return
+        self.compare_url_var.set(url)
+        self._show_tab("Compare")
+        self._start_compare()
     def _reload_owner_lock_names(self):
         """Refill the Owners 'Find lock' autocomplete list from the catalog,
         honoring the Owners belt filter."""
