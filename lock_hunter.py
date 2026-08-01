@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "4.7.6"
+VERSION = "4.7.7"
 
 
 
@@ -697,14 +697,18 @@ def _parse_ebay_search(html):
 
 def _parse_ebay_search_loose(html):
     """Layout-robust fallback. eBay ships several search-result card designs
-    (classic 's-item', newer 'su-card', mobile), and the /itm/ anchor wraps a
-    large block of nested markup — so instead of reading the anchor's own text
-    we find every /itm/<id> link and pull a title + price from the card markup
-    AROUND it, trying the title spots eBay actually uses in order: a heading
-    span, s-item__title, the newer su-styled-text primary line, the product
-    image alt, then aria-label. Item ids are global, so the link is rebuilt
-    canonically from the id."""
-    out, seen = [], set()
+    (classic 's-item', newer 's-card'/'su-card', mobile), and the /itm/ anchor
+    wraps a large block of nested markup — so instead of reading the anchor's
+    own text we find every /itm/<id> link and pull a title + price from the
+    card markup around it. TITLE comes from a window near the link (heading
+    span, s-item__title, the newer su-styled-text primary line, image alt,
+    aria-label — in that order). PRICE is searched across the WHOLE card —
+    from this card's link up to the NEXT card's link — because in the s-card
+    layout the price element sits thousands of characters after the anchor
+    (past the srcset image block), beyond any fixed-size window. Card
+    boundaries also stop a neighbour's price from bleeding in. Item ids are
+    global, so the link is rebuilt canonically from the id."""
+    out = []
     title_pats = (
         r'role="heading"[^>]*>\s*(?:<[^>]+>\s*)*([^<]{3,180})',
         r's-item__title[^"]*"[^>]*>\s*(?:<span[^>]*>\s*)*([^<]{3,180})',
@@ -712,16 +716,47 @@ def _parse_ebay_search_loose(html):
         r'<img[^>]+alt="([^"]{3,180})"',
         r'aria-label="([^"]{3,180})"',
     )
+    _CUR = r'(?:US\s*\$|C\s*\$|AU\s*\$|EUR|GBP|£|€|\$)'
+    price_pats = (
+        # eBay's own price element (new + classic class names)
+        r'(?:s-card__price|s-item__price)[^>]*>\s*(?:<[^>]+>\s*)*'
+        r'([^<]{1,60}\d[^<]{0,40})',
+        # any styled-text span whose text starts with a currency
+        r'su-styled-text[^"]*"[^>]*>\s*(' + _CUR + r'\s?\d[\d.,]*)',
+        # bare currency-prefixed amount ($12.34, EUR 12,34, US $5.00)
+        r'(' + _CUR + r'\s?\d[\d.,]*)',
+        # European suffix style (12,34 €)
+        r'(\d[\d.,]*\s?(?:€|EUR))',
+    )
+    # first occurrence of each distinct item id, in page order — the gap
+    # between one id's first link and the next id's first link IS the card
+    firsts, seen = [], set()
     for m in re.finditer(r'/itm/(?:[^"/?\s]+/)?(\d{9,})', html):
-        iid = m.group(1)
-        if iid in seen:
-            continue
-        window = html[max(0, m.start() - 600): m.start() + 2600]
+        if m.group(1) not in seen:
+            seen.add(m.group(1))
+            firsts.append((m.start(), m.group(1)))
+    for k, (pos, iid) in enumerate(firsts):
+        card_end = firsts[k + 1][0] if k + 1 < len(firsts) else pos + 9000
+        card = html[pos: min(card_end, pos + 9000)]
+        window = html[max(0, pos - 600): pos + 2600]
+        # Title: search THIS card first (forward from its link) so a
+        # neighbouring card's trailing spans can't be mistaken for it; the
+        # pre-link window is only a fallback. A candidate that is just a
+        # price ("$26.99") is skipped — some layouts style the price with the
+        # same su-styled-text classes as the title.
+        _pricey = re.compile(r"^(?:US\s*\$|C\s*\$|AU\s*\$|EUR|GBP|£|€|\$)"
+                             r"\s?\d[\d.,]*$")
         title = ""
-        for pat in title_pats:
-            tm = re.search(pat, window, re.I | re.S)
-            if tm:
-                title = tm.group(1)
+        for scope in (card, window):
+            for pat in title_pats:
+                for tm in re.finditer(pat, scope, re.I | re.S):
+                    cand = re.sub(r"\s+", " ", tm.group(1)).strip()
+                    if cand and not _pricey.match(cand):
+                        title = cand
+                        break
+                if title:
+                    break
+            if title:
                 break
         title = re.sub(r"\s+", " ", title).strip()
         title = re.sub(r"^New Listing\s*", "", title, flags=re.I)
@@ -730,11 +765,17 @@ def _parse_ebay_search_loose(html):
         if not title or low in ("shop on ebay", "new listing") \
                 or low.startswith("opens in a"):
             continue
-        pm = re.search(r'((?:US\s*\$|C\s*\$|AU\s*\$|EUR|GBP|£|€|\$)'
-                       r'\s?\d[\d.,]*)', window)
-        price = re.sub(r"\s+", " ", pm.group(1)).strip() if pm else ""
-        seen.add(iid)
-        img = _first_image_url(window)
+        price = ""
+        for pat in price_pats:
+            pm = re.search(pat, card, re.S)
+            if pm:
+                cand = re.sub(r"<[^>]+>", " ", pm.group(1))
+                cand = cand.replace("&nbsp;", " ").replace("&amp;", "&")
+                cand = re.sub(r"\s+", " ", cand).strip()
+                if re.search(r"\d", cand):
+                    price = cand
+                    break
+        img = _first_image_url(card) or _first_image_url(window)
         out.append((title, price, f"https://www.ebay.com/itm/{iid}", img))
         if len(out) >= 120:
             break
@@ -895,7 +936,9 @@ def search_ebay_direct(lock_name, status_cb, deep=False, origin=""):
                 continue
             items = _parse_ebay_search(text)
             n_img = sum(1 for it in items if len(it) > 3 and it[3])
-            _log_diag(diag + f", parsed={len(items)}, imgs={n_img}")
+            n_price = sum(1 for it in items if it[1])
+            _log_diag(diag + f", parsed={len(items)}, imgs={n_img}"
+                             f", prices={n_price}")
             # If eBay served listings (itm_links=yes) but the parser got no
             # titles — OR got titles but no photos — dump a cleaned sample of
             # the card markup around the first /itm/ link so the exact
@@ -1233,14 +1276,40 @@ _MP_UA = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
+# Currencies of every marketplace Lock Hunter probes. PRE = tokens that come
+# BEFORE the amount ("CHF 45", "US $12", "₪120"); SUF = tokens that come AFTER
+# ("249 kr", "12 000 Ft", "3400円"). Codes cover eBay/JSON-LD style prices
+# ("SEK 249"); symbols cover on-page prices.
+_MP_CUR_PRE = (r"US\s*\$|AU\s*\$|CA\s*\$|C\s*\$|NZ\s*\$|HK\s*\$|R\$|"
+               r"€|£|\$|¥|₪|₽|₺|₴|Kč|zł|Ft|лв|руб|грн|Fr\.|"
+               r"EUR|GBP|USD|CHF|SEK|NOK|DKK|ISK|PLN|CZK|HUF|RON|RSD|BGN|"
+               r"TRY|ILS|RUB|UAH|JPY|CNY|CAD|AUD|NZD|BRL|BYN")
+_MP_CUR_SUF = (r"€|£|\$|¥|₪|₽|₺|₴|kr\.?|Kč|zł|Ft|лв|дин|din|lei|руб|Br|円|元|"
+               r"EUR|GBP|USD|CHF|SEK|NOK|DKK|ISK|PLN|CZK|HUF|RON|RSD|BGN|"
+               r"TRY|TL|ILS|RUB|UAH|JPY|CNY")
+# amount: 12 / 12.34 / 1,234.56 / 1 234,56 (space or nbsp thousands) plus the
+# Swiss "45.–" ending
+_MP_AMT = r"\d(?:[\d., ]{0,12}\d)?(?:[.,]\s?[–—-])?"
+
 def _mp_price_near(text, idx, window=240):
-    """Find a price-looking token near a position in text."""
+    """Find a price-looking token near a position in text. Knows the currency
+    of every site the app probes — €/£/$ plus kr (SEK/NOK/DKK/ISK), Kč, zł,
+    Ft, CHF, ₪, ₽, ₺/TL, лв, din, lei, ¥/円 … — in both prefix ("CHF 45.–")
+    and suffix ("12 000 Ft", "249 kr") positions, plus the Swedish "249:-"
+    shorthand. Space/nbsp thousands are handled."""
     seg = text[idx:idx + window]
-    m = re.search(r"((?:€|EUR|£|GBP|\$|US\s*\$)\s?\d[\d.,]*)", seg)
-    if m:
-        return re.sub(r"\s+", " ", m.group(1)).strip()
-    m = re.search(r"(\d[\d.,]*)\s?(?:€|EUR|£|\$)", seg)
-    return (m.group(0).strip() if m else "")
+    seg = (seg.replace("&nbsp;", " ").replace("&#160;", " ")
+              .replace("\u00a0", " ").replace("\u202f", " ")
+              .replace("\xa0", " "))
+    m = re.search(r"((?:" + _MP_CUR_PRE + r")\s?" + _MP_AMT + r")", seg)
+    if not m:
+        m = re.search(r"(" + _MP_AMT + r"\s?(?:" + _MP_CUR_SUF + r"))"
+                      r"(?![A-Za-z])", seg)
+    if not m:
+        m = re.search(r"(\d[\d ]{0,9}\d\s?:[-–—]|\d\s?:[-–—])", seg)
+    if not m:
+        return ""
+    return re.sub(r"\s+", " ", m.group(1)).strip()
 
 def _jsonld_products(html):
     """Yield product-ish dicts from any <script type=ld+json> blocks."""
@@ -1544,16 +1613,40 @@ _LOCK_CONTEXT_WORDS = {
     "kljuc", "brava", "lokot", "kilit", "anahtar", "zamki", "cilindar",
     # Turkish
     "kilidi", "silindir",
+    # Hungarian (Jófogás) — "zar" is word-boundary-gated via the strict set
+    "lakat", "kulcs", "zarbetet", "hevederzar", "zar",
+    # Lithuanian / Estonian / Latvian (Skelbiu, Osta, SS.com)
+    "spyna", "raktas", "lukk", "tabalukk", "sledzene", "atslega",
+    "piekarama atslega", "voti",
+    # Romanian (OLX.ro)
+    "lacat", "cheie", "broasca",
+    # Icelandic (Bland.is)
+    "hengilas", "lykill",
+    # Serbian / Croatian (KupujemProdajem, Njuškalo)
+    "katanac",
 }
 # a few short ones need word-boundary care to avoid matching inside other words
-_LOCK_WORDS_STRICT = {"key", "las", "slot", "safe", "cle", "cles", "brava"}
+_LOCK_WORDS_STRICT = {"key", "las", "slot", "safe", "cle", "cles", "brava",
+                      "zar", "voti", "lukk"}
 
-# Cyrillic lock words (Bulgarian/Russian/etc.). _fold() strips Cyrillic to
-# nothing, so these are matched against the RAW title instead. Helps listings
-# that pair a Latin brand ("Ruko") with a Cyrillic description.
+# Lock words in scripts that _fold() would strip to nothing (Cyrillic, Hebrew,
+# Greek, Japanese, Chinese) — matched against the RAW lowercased title instead.
+# Helps listings that pair a Latin brand ("Ruko") with a native description,
+# and whole-script titles on Yad2 / Buyee / Yahoo JP / Mercari / Taobao /
+# Bazaraki / Kufar / Avito.
 _LOCK_WORDS_CYRILLIC = (
     "ключалка", "катинар", "цилиндър", "цилиндр", "секрет", "брава",
     "замок", "замка", "патрон", "заключв", "ключ",
+    # Serbian
+    "катанац", "кључ",
+    # Hebrew (Yad2)
+    "מנעול", "מנעולים", "צילינדר", "מפתח",
+    # Greek (Bazaraki)
+    "κλειδαριά", "λουκέτο", "κλειδί", "κύλινδρος",
+    # Japanese (Buyee / Yahoo / Mercari)
+    "南京錠", "錠前", "鍵", "カギ", "シリンダー",
+    # Chinese (Taobao)
+    "挂锁", "锁芯", "钥匙", "门锁", "锁具", "锁",
 )
 
 def _has_lock_context(title):
@@ -3274,6 +3367,9 @@ _CUR_SYMBOLS = [  # longest first so "US $" wins over "$"
     ("US $", "USD"), ("AU $", "AUD"), ("CA $", "CAD"), ("C $", "CAD"),
     ("A$", "AUD"), ("NZ$", "NZD"), ("HK$", "HKD"), ("R$", "BRL"),
     ("zł", "PLN"), ("Kč", "CZK"), ("грн", "UAH"), ("₴", "UAH"),
+    ("Ft", "HUF"), ("₺", "TRY"), ("TL", "TRY"), ("лв", "BGN"),
+    ("lei", "RON"), ("дин", "RSD"), ("din", "RSD"), ("руб", "RUB"),
+    ("Fr.", "CHF"), ("円", "JPY"), ("元", "CNY"),
     ("€", "EUR"), ("£", "GBP"), ("¥", "JPY"),
     ("₪", "ILS"), ("₽", "RUB"), ("₹", "INR"), ("$", "USD"),
 ]
@@ -4226,6 +4322,25 @@ def _wl_save_seen(urls):
 
 def _wl_has_baseline():
     return bool(_wl_load_seen())
+
+
+def _wl_record_run(old_baseline, found_urls, cancelled):
+    """What to save as the baseline after a wishlist hunt. Returns the set to
+    write, or None to leave the stored baseline untouched.
+
+    - Completed run: REPLACE with this run's findings (stale, delisted urls age
+      out) — but never wipe an existing baseline with an empty result (that
+      only happens when every site failed).
+    - Cancelled run: MERGE what was seen so far into the existing baseline. A
+      partial baseline is strictly better than none: it's what makes "New
+      Wishlist Search" usable at all for big wishlists, where hunts are
+      routinely cancelled part-way."""
+    found = {u for u in (found_urls or set()) if u}
+    old = {u for u in (old_baseline or set()) if u}
+    if cancelled:
+        merged = old | found
+        return merged if merged else None
+    return found if found else None
 
 # ------------------------------------------------------- LPU profile import
 
@@ -6739,11 +6854,18 @@ class LockHunter(tk.Tk):
         tk.Label(
             body,
             text=("Search a lock by name (or pick a belt) to see which "
-                  "collectors on the LPU leaderboard own it. Or use "
-                  "\u201cTop wishlist owners\u201d to find the 10 collectors who "
-                  "own the most locks on your wishlist. The first search loads "
-                  "every listed collection, which can take a few minutes; "
-                  "after that, searches are instant until you refresh."),
+                  "collectors on the LPU leaderboard own it. The first search "
+                  "loads every listed collection, which can take a few "
+                  "minutes; after that, searches are instant until you "
+                  "refresh.\n\n"
+                  "\u201cTop wishlist owners\u201d \u2014 the 10 collectors who own "
+                  "the most locks on your wishlist (handy for spotting who to "
+                  "approach for a trade). It reads the loaded collections, so "
+                  "it shares that same first-time load.\n\n"
+                  "\u201cTop Bazaar sellers\u201d \u2014 the sellers who currently "
+                  "have the most of your wishlist locks listed for sale on the "
+                  "LPU Lock Bazaar. This reads the live Bazaar feed rather than "
+                  "collections, so it\u2019s instant and needs no load."),
             bg=self.C_PANEL, fg=self.C_MUTE, font=("Segoe UI", 10),
             justify="left", wraplength=780).pack(anchor="w", pady=(0, 10))
 
@@ -8367,10 +8489,14 @@ class LockHunter(tk.Tk):
                     f"(total {grand}).")))
                 # refresh the visible table as results accumulate
                 self.q.put(("refresh_table", None))
-            # Record this run's full findings as the new baseline (skip if the
-            # hunt was cancelled, so a partial run doesn't poison "only new").
-            if not getattr(self, "_wishlist_hunt_cancel", False):
-                _wl_save_seen(all_urls)
+            # Record this run as the baseline. Completed runs replace it;
+            # cancelled runs MERGE their partial findings into it — so even a
+            # part-way hunt unlocks (and improves) "New Wishlist Search".
+            to_save = _wl_record_run(
+                baseline, all_urls,
+                getattr(self, "_wishlist_hunt_cancel", False))
+            if to_save is not None:
+                _wl_save_seen(to_save)
             self.q.put(("status", log(
                 f"Wishlist hunt done: {grand} "
                 + ("new " if new_only else "")
