@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "4.7.5"
+VERSION = "4.7.6"
 
 
 
@@ -903,9 +903,9 @@ def search_ebay_direct(lock_name, status_cb, deep=False, origin=""):
             if has_itm and (not items or n_img == 0):
                 _im = re.search(r'/itm/\d{9,}', text)
                 if _im:
-                    _s = text[max(0, _im.start() - 600): _im.start() + 900]
+                    _s = text[max(0, _im.start() - 200): _im.start() + 1700]
                     _s = re.sub(r"\s+", " ", _s.replace("<", " <"))
-                    _log_diag("eBay markup sample: " + _s[:1100])
+                    _log_diag("eBay markup sample: " + _s[:1600])
             matched = 0
             for row in items:
                 title, price, link = row[0], row[1], row[2]
@@ -1280,17 +1280,40 @@ def _clean_img_url(u):
     return u
 
 
+# Matches an HTML attribute value that may be double-quoted, single-quoted, or
+# UNQUOTED — eBay now ships minified search markup where href/src/etc. have no
+# quotes (href=https://... , src=https://...). Group 1/2/3 = the three forms.
+_ATTR_VAL = r'''(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))'''
+
+
+def _attr_val(m):
+    return _clean_img_url(m.group(1) or m.group(2) or m.group(3) or "")
+
+
 def _first_image_url(window):
-    """Pick the best real photo URL from a chunk of card HTML. Prefers lazy-load
-    attributes (data-src / srcset) since the plain src is often a 1x1 or a
-    base64 placeholder, and filters out sprites, icons, logos and the like."""
+    """Pick the best real photo URL from a chunk of card HTML. Tolerant of
+    eBay's minified markup where attribute values are UNQUOTED. Prefers
+    lazy-load attributes (data-src / srcset — their value is the real URL, the
+    plain src is often a 1x1 or base64 placeholder), then plain src, then JSON
+    image fields; filters out sprites, icons, logos and placeholders."""
     cands = []
-    for pat in (r'data-(?:src|imgsrc|original|lazy|image|thumb)="([^"]+)"',
-                r'\bsrcset="([^" ,]+)',
-                r'<img[^>]+\bsrc="([^"]+)"',
-                r'"(?:image|imageUrl|thumbnailUrl|img|thumbnail)"\s*:\s*"([^"]+)"'):
-        for m in re.finditer(pat, window, re.I):
-            cands.append(_clean_img_url(m.group(1)))
+    # lazy-load / data-* image attributes first (most reliable real URL)
+    for attr in ("data-src", "data-imgsrc", "data-original", "data-lazy",
+                 "data-image", "data-thumb", "data-defersrc", "data-img"):
+        for m in re.finditer(attr + r'\s*=\s*' + _ATTR_VAL, window, re.I):
+            cands.append(_attr_val(m))
+    # srcset: take the first URL of the candidate list
+    for m in re.finditer(r'\bsrcset\s*=\s*' + _ATTR_VAL, window, re.I):
+        v = (m.group(1) or m.group(2) or m.group(3) or "")
+        cands.append(_clean_img_url(v.split(",")[0].strip().split(" ")[0]))
+    # plain src, but NOT the 'src' inside data-src / xlink:src etc.
+    for m in re.finditer(r'(?<![-\w:])src\s*=\s*' + _ATTR_VAL, window, re.I):
+        cands.append(_attr_val(m))
+    # JSON-ish image fields
+    for m in re.finditer(
+            r'"(?:image|imageUrl|thumbnailUrl|img|thumbnail)"\s*:\s*"([^"]+)"',
+            window, re.I):
+        cands.append(_clean_img_url(m.group(1)))
     for u in cands:
         ul = u.lower()
         if not ul.startswith("http") or u.startswith("data:"):
@@ -4167,6 +4190,43 @@ def _bazaar_entry_key(e):
     price_digits = re.sub(r"[^0-9]", "", _bz_price(e))
     return "c:" + "|".join([seller, lock, price_digits])
 
+
+_WL_SEEN_VER = 1
+
+
+def _wl_seen_path():
+    return os.path.join(APP_DIR, "wishlist_seen.json")
+
+
+def _wl_load_seen():
+    """URLs found by the PREVIOUS wishlist search — the baseline the
+    'only new listings' scope diffs against."""
+    try:
+        with open(_wl_seen_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and d.get("v") == _WL_SEEN_VER:
+            return set(d.get("urls") or [])
+    except Exception:
+        pass
+    return set()
+
+
+def _wl_save_seen(urls):
+    """Record this run's full findings as the new baseline for next time."""
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(_wl_seen_path(), "w", encoding="utf-8") as f:
+            json.dump({"v": _WL_SEEN_VER,
+                       "urls": sorted(u for u in urls if u),
+                       "ts": datetime.datetime.now().isoformat(
+                           timespec="seconds")}, f)
+    except Exception:
+        pass
+
+
+def _wl_has_baseline():
+    return bool(_wl_load_seen())
+
 # ------------------------------------------------------- LPU profile import
 
 def _discover_firebase_from_site(status_cb):
@@ -4599,6 +4659,219 @@ def save_profile(uid, own, wish):
 # one's lockcollections/<uid> document (the same public per-doc read the
 # profile import and Compare tab use) to get their owned lock-id arrays.
 LEADERBOARD_URL = "https://explore.lpubelts.com/data/leaderboardData.json"
+
+
+def _is_no_display_name(name):
+    """True if an owner's display name is missing or a known placeholder
+    ('no display name', '(unknown)', empty). Such owners are hidden from the
+    Owners results."""
+    n = (name or "").strip().lower()
+    return n in ("", "(unknown)", "unknown", "no display name",
+                 "no displayname", "no name")
+
+
+def fetch_leaderboard(status_cb=lambda s: None):
+    """Fetch the public LPU leaderboard. Returns a list of per-user dicts with
+    (at least) id/displayName/own(count)/privacy flags. Raises on failure."""
+    status_cb("Fetching the LPU leaderboard…")
+    r = requests.get(LEADERBOARD_URL, headers=_MP_UA, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Leaderboard fetch failed (HTTP {r.status_code}).")
+    data = r.json()
+    if isinstance(data, dict):
+        for k in ("leaders", "data", "leaderboard", "entries", "rows", "results"):
+            if isinstance(data.get(k), list):
+                data = data[k]
+                break
+    if not isinstance(data, list):
+        raise RuntimeError("Leaderboard data was not in the expected format.")
+    return data
+
+
+def _own_ids_from_fields(fields):
+    """Pull owned lock ids (own + safelocksOwn) from a decoded collection doc."""
+    own = set()
+    for f in ("own", "safelocksOwn"):
+        v = fields.get(f)
+        if isinstance(v, list):
+            own.update(str(x) for x in v if isinstance(x, (str, int)))
+    return own
+
+
+def _profile_from_fields(fields):
+    """From a decoded lockcollections/<uid> doc, return the owned lock ids and
+    the anonymity flag. We deliberately do NOT read the doc's displayName, so a
+    collector who set themselves Anonymous is never de-anonymized by this tool."""
+    return {
+        "owned": _own_ids_from_fields(fields),
+        "doc_anon": bool(fields.get("privacyAnonymous")),
+    }
+
+
+def _fs_batch_get(pid, key, uids, token, status_cb=lambda s: None, chunk=100,
+                  failed_out=None):
+    """Read many lockcollections/<uid> docs in one go via Firestore batchGet.
+    Returns {uid: profile_dict} for docs successfully read, where each
+    profile_dict is {owned:set, doc_anon:bool} (see
+    _profile_from_fields). Falls back to sequential single-doc reads for any
+    chunk where batchGet fails (that read path is the one the Compare tab
+    already uses successfully).
+
+    If `failed_out` is a set, every uid whose collection could NOT be read
+    (network/permission error, not merely an empty collection) is added to it,
+    so callers can distinguish 'owns nothing' from 'we couldn't check'."""
+    doc_base = ("projects/" + pid + "/databases/(default)/documents/"
+                "lockcollections/")
+    url = ("https://firestore.googleapis.com/v1/projects/" + pid +
+           "/databases/(default)/documents:batchGet?key=" + key)
+    out = {}
+    total = len(uids)
+    for i in range(0, total, chunk):
+        part = uids[i:i + chunk]
+        ok = False
+        seen_in_chunk = set()
+        try:
+            r = requests.post(url, json={"documents": [doc_base + u for u in part]},
+                              headers=_fs_headers(token), timeout=45)
+            if r.status_code == 200:
+                ok = True
+                for row in r.json():
+                    doc = row.get("found")
+                    if not doc:
+                        # a 'missing' entry: the doc genuinely doesn't exist
+                        # (collector saved nothing) — a real empty, not a fail
+                        miss = row.get("missing")
+                        if miss:
+                            seen_in_chunk.add(miss.rsplit("/", 1)[-1])
+                        continue
+                    uid = doc["name"].rsplit("/", 1)[-1]
+                    seen_in_chunk.add(uid)
+                    fields = {k: _fs_value(v)
+                              for k, v in (doc.get("fields") or {}).items()}
+                    out[uid] = _profile_from_fields(fields)
+        except Exception:
+            ok = False
+        if not ok:
+            # fall back to individual reads for this chunk
+            for u in part:
+                fields, code = _fs_get_doc(pid, key, "lockcollections/" + u,
+                                           token=token)
+                if code == 200 and fields:
+                    out[u] = _profile_from_fields(fields)
+                    seen_in_chunk.add(u)
+                elif code == 200:
+                    seen_in_chunk.add(u)   # read OK, just empty
+                # anything else (403/404/error) => not seen => counted failed
+        if failed_out is not None:
+            for u in part:
+                if u not in seen_in_chunk:
+                    failed_out.add(u)
+        status_cb(f"Reading collections… {min(i + chunk, total)}/{total}")
+    return out
+
+
+def load_top_owners(limit=None, status_cb=lambda s: None):
+    """Fetch the leaderboard and read each listed collector's owned lock ids.
+    With limit=None (the default) it loads EVERY collector on the leaderboard
+    (honoring the privacy flag); pass an integer to cap to the top N by owned
+    count. Returns a list of dicts: {uid, name, anon, own_count, owned(set)}."""
+    leaders = fetch_leaderboard(status_cb)
+
+    def own_count(e):
+        v = e.get("own")
+        return v if isinstance(v, (int, float)) else 0
+
+    ranked = [e for e in leaders
+              if not e.get("privacyNoLeaderboard") and own_count(e) > 0]
+    ranked.sort(key=own_count, reverse=True)
+    top = ranked if limit is None else ranked[:limit]
+    uids = [str(e.get("id") or e.get("userId")) for e in top
+            if (e.get("id") or e.get("userId"))]
+    status_cb(f"{len(uids)} collectors listed; reading their collections…")
+
+    pid_key = None
+    for pid, key in _firebase_params(status_cb):
+        if key:
+            pid_key = (pid, key)
+            break
+    if not pid_key:
+        raise RuntimeError("Couldn't determine LPU's database settings.")
+    pid, key = pid_key
+    token = _anon_sign_in(key, status_cb)
+    failed = set()
+    prof_map = _fs_batch_get(pid, key, uids, token, status_cb,
+                             failed_out=failed)
+    if failed:
+        status_cb(f"Note: {len(failed)} of {len(uids)} collections couldn't "
+                  f"be read (private or unavailable).")
+
+    owners = []
+    for e in top:
+        uid = str(e.get("id") or e.get("userId") or "")
+        if not uid:
+            continue
+        prof = prof_map.get(uid) or {}
+        lb_name = (e.get("displayName") or "").strip()   # public leaderboard name
+        anon = bool(e.get("privacyAnonymous")) or prof.get("doc_anon", False)
+        owners.append({
+            "uid": uid,
+            "name": lb_name or "(unknown)",
+            "anon": anon,
+            "own_count": int(own_count(e)),
+            "owned": prof.get("owned", set()),
+            "read_failed": uid in failed,
+        })
+    return owners
+
+
+def _owners_cache_path():
+    return os.path.join(APP_DIR, "owners_cache.json")
+
+
+def save_owners_cache(owners):
+    """Persist the loaded collections to disk so the next session's first
+    owner search doesn't have to re-download everything (minutes)."""
+    try:
+        payload = {
+            "at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "owners": [{"uid": o.get("uid", ""), "name": o.get("name", ""),
+                        "anon": bool(o.get("anon")),
+                        "own_count": o.get("own_count", 0),
+                        "read_failed": bool(o.get("read_failed")),
+                        "owned": sorted(o.get("owned") or [])}
+                       for o in owners],
+        }
+        with open(_owners_cache_path(), "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except Exception:
+        pass   # cache is best-effort
+
+
+def load_owners_cache(max_age_hours=24):
+    """Return (owners, loaded_at) from the on-disk cache if it exists, parses,
+    and is younger than max_age_hours — else (None, None). `owned` comes back
+    as a set, matching what load_top_owners produces."""
+    try:
+        with open(_owners_cache_path(), "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        at = datetime.datetime.fromisoformat(payload["at"])
+        age = (datetime.datetime.now() - at).total_seconds()
+        if age < 0 or age > max_age_hours * 3600:
+            return None, None
+        owners = []
+        for o in payload.get("owners", []):
+            owners.append({"uid": str(o.get("uid", "")),
+                           "name": str(o.get("name", "")),
+                           "anon": bool(o.get("anon")),
+                           "own_count": int(o.get("own_count", 0)),
+                           "read_failed": bool(o.get("read_failed")),
+                           "owned": set(o.get("owned") or [])})
+        if not owners:
+            return None, None
+        return owners, at
+    except Exception:
+        return None, None
+
 
 
 
@@ -5783,7 +6056,7 @@ class LockHunter(tk.Tk):
                 self.bind_all(seq, self._go_back_tab)
             except tk.TclError:
                 pass
-        for name in ("Search", "Locks", "Compare"):
+        for name in ("Search", "Locks", "Compare", "Owners"):
             b = tk.Label(tabbar, text=name, bg=self.C_PANEL2, fg=self.C_MUTE,
                          font=("Segoe UI Semibold", 11), padx=22, pady=10,
                          cursor="hand2")
@@ -5798,10 +6071,12 @@ class LockHunter(tk.Tk):
         self.page_search = tk.Frame(self._pages, bg=self.C_BG)
         self.page_locks = tk.Frame(self._pages, bg=self.C_BG)
         self.page_compare = tk.Frame(self._pages, bg=self.C_BG)
+        self.page_owners = tk.Frame(self._pages, bg=self.C_BG)
 
         self._build_search_tab(self.page_search)
         self._build_locks_tab(self.page_locks)
         self._build_compare_tab(self.page_compare)
+        self._build_owners_tab(self.page_owners)
 
         # ---- status bar (with version on the right)
         tk.Frame(self, bg=self.C_LINE, height=1).pack(fill="x")
@@ -5851,8 +6126,10 @@ class LockHunter(tk.Tk):
         self.page_search.pack_forget()
         self.page_locks.pack_forget()
         self.page_compare.pack_forget()
+        self.page_owners.pack_forget()
         page = {"Search": self.page_search, "Locks": self.page_locks,
-                "Compare": self.page_compare}.get(name, self.page_search)
+                "Compare": self.page_compare,
+                "Owners": self.page_owners}.get(name, self.page_search)
         page.pack(fill="both", expand=True)
         if name == "Locks":
             self._refresh_locks_table()
@@ -6372,6 +6649,7 @@ class LockHunter(tk.Tk):
             except Exception:
                 old_keys = set()
             lines = []
+            new_entries = []
             if old_keys:                      # not the first ever run
                 new_entries = [e for e in entries
                                if _bazaar_entry_key(e) not in old_keys]
@@ -6411,6 +6689,13 @@ class LockHunter(tk.Tk):
                             if price:
                                 bit += f" ({price})"
                             lines.append(bit)
+            # Persist a visible line so it's clear the watch ran and what it
+            # saw, even when nothing pops up (it only alerts on WISHLIST
+            # matches — by design).
+            log(f"Bazaar watch: feed has {len(entries)} listing(s); "
+                f"{len(new_entries)} new since last login; "
+                f"{len(lines)} on your wishlist"
+                + ("" if old_keys else " — first run, baseline saved"))
             try:
                 with open(snap_path, "w", encoding="utf-8") as f:
                     json.dump({"v": _BZ_SNAP_VER, "keys": sorted(cur_keys)}, f)
@@ -6443,6 +6728,722 @@ class LockHunter(tk.Tk):
             menu.tk_popup(evt.x_root, evt.y_root)
         finally:
             menu.grab_release()
+
+    def _build_owners_tab(self, wrap):
+        pad = tk.Frame(wrap, bg=self.C_BG)
+        pad.pack(fill="both", expand=True, padx=14, pady=12)
+
+        card, body = self._card(pad, "WHO OWNS A LOCK")
+        card.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text=("Search a lock by name (or pick a belt) to see which "
+                  "collectors on the LPU leaderboard own it. Or use "
+                  "\u201cTop wishlist owners\u201d to find the 10 collectors who "
+                  "own the most locks on your wishlist. The first search loads "
+                  "every listed collection, which can take a few minutes; "
+                  "after that, searches are instant until you refresh."),
+            bg=self.C_PANEL, fg=self.C_MUTE, font=("Segoe UI", 10),
+            justify="left", wraplength=780).pack(anchor="w", pady=(0, 10))
+
+        LF = ("Segoe UI", 10)
+        # The results counter + ★ legend get their OWN full-width row ABOVE
+        # the buttons, so the text can never be clipped off the right edge by
+        # the button row again.
+        info_row = tk.Frame(body, bg=self.C_PANEL)
+        info_row.pack(fill="x", pady=(0, 4))
+        tk.Label(info_row,
+                 text=("\u2605 after a lock/seller = for sale on the LPU "
+                       "Lock Bazaar      \u00b7      Rarity: "
+                       "\u2605\u2605\u2605\u2605\u2605 rarest \u2192 "
+                       "\u2605 most common"),
+                 bg=self.C_PANEL, fg=self.C_MUTE, font=LF).pack(side="left")
+        self.owners_count_var = tk.StringVar(value="")
+        tk.Label(info_row, textvariable=self.owners_count_var,
+                 bg=self.C_PANEL, fg=self.C_MUTE, font=LF).pack(side="right")
+        ctrl = tk.Frame(body, bg=self.C_PANEL)
+        ctrl.pack(fill="x", pady=(0, 10))
+        tk.Label(ctrl, text="Find lock:", bg=self.C_PANEL, fg=self.C_MUTE,
+                 font=LF).pack(side="left", padx=(0, 6))
+        self.owners_find_var = tk.StringVar()
+        self.owners_find_box = ttk.Combobox(
+            ctrl, textvariable=self.owners_find_var, width=30)
+        self.owners_find_box.pack(side="left", padx=(0, 10))
+        self.owners_find_box.bind("<KeyRelease>", self._filter_owner_locks)
+        self.owners_find_box.bind("<Return>",
+                                  lambda *_: self._start_owner_search())
+        self.owners_find_box.bind("<<ComboboxSelected>>",
+                                  self._clear_combo_highlight)
+        tk.Label(ctrl, text="Belt:", bg=self.C_PANEL, fg=self.C_MUTE,
+                 font=LF).pack(side="left", padx=(0, 6))
+        self.owners_belt_var = tk.StringVar(value="All belts")
+        self.owners_belt_box = ttk.Combobox(
+            ctrl, textvariable=self.owners_belt_var, width=11, state="readonly",
+            values=["All belts", "White", "Yellow", "Orange", "Green", "Blue",
+                    "Purple", "Brown", "Red", "Black", "Unranked"])
+        self.owners_belt_box.pack(side="left", padx=(0, 10))
+        self.owners_belt_box.bind(
+            "<<ComboboxSelected>>", lambda *_: self._on_owners_belt_changed())
+        self.owners_btn = FlatButton(ctrl, "Search owners",
+                                     command=self._start_owner_search,
+                                     kind="primary")
+        self.owners_btn.pack(side="left")
+        self.owners_refresh_btn = FlatButton(ctrl, "Refresh all",
+                                             command=self._refresh_owners,
+                                             kind="outline")
+        self.owners_refresh_btn.pack(side="left", padx=(10, 0))
+        self.wishtop_btn = FlatButton(
+            ctrl, "Top wishlist owners",
+            command=self._start_wishlist_top_owners, kind="outline")
+        self.wishtop_btn.pack(side="left", padx=(10, 0))
+        self.bztop_btn = FlatButton(
+            ctrl, "Top Bazaar sellers",
+            command=self._show_bazaar_top_sellers, kind="outline")
+        self.bztop_btn.pack(side="left", padx=(10, 0))
+        self.owners_export_btn = FlatButton(
+            ctrl, "Export CSV", command=self._export_owners_csv,
+            kind="outline")
+        self.owners_export_btn.pack(side="left", padx=(10, 0))
+
+        table = tk.Frame(body, bg=self.C_PANEL)
+        table.pack(fill="both", expand=True)
+        cols = ("lock", "belt", "rarity", "owner", "owned", "pad")
+        heads = ("Lock", "Belt", "Rarity", "Owner", "Their collection", "")
+        style = ttk.Style(self)
+        style.configure("Owners.Treeview", font=("Segoe UI", 11), rowheight=26)
+        style.configure("Owners.Treeview.Heading", font=("Segoe UI Semibold", 10))
+        self.owners_tree = ttk.Treeview(table, columns=cols, show="headings",
+                                        style="Owners.Treeview")
+        specs = [("lock", 250, "w", False), ("belt", 78, "w", False),
+                 ("owner", 200, "w", False),
+                 ("owned", 120, "center", False), ("pad", 20, "w", True)]
+        for (c, w, anchor, stretch), h in zip(specs, heads):
+            self.owners_tree.heading(c, text=h)
+            self.owners_tree.column(c, width=w, anchor=anchor, stretch=stretch)
+        vs = ttk.Scrollbar(table, orient="vertical", command=self.owners_tree.yview)
+        self.owners_tree.configure(yscrollcommand=vs.set)
+        self.owners_tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
+        self.owners_tree.tag_configure("odd", background=self.C_PANEL)
+        self.owners_tree.tag_configure("even", background=self.C_FIELD)
+        self.owners_tree.tag_configure("ownergrp", background=self.C_SEL,
+                                       foreground=self.C_ACCENT)
+        self.owners_tree.bind("<Double-1>", self._owners_open_profile)
+        self._owners_profiles = {}
+
+        tk.Label(
+            body,
+            text=("Double-click an owner to open their LPU profile.  "
+                  "Anonymous collectors are shown but can't be opened."),
+            bg=self.C_PANEL, fg=self.C_MUTE,
+            font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 0))
+
+        self._owners_cache = []        # cached list of owner dicts (all listed collectors)
+        self._owners_loaded_at = None
+        self._pending_owner_lock_id = None
+        self._owners_load_mode = "search"   # or "wishtop"
+        self._owners_export = None          # (headers, rows) for CSV export
+        # warm-start from the on-disk cache (saved after each full load) so
+        # the first search of a session is instant instead of a minutes-long
+        # download; "Refresh all" still forces a fresh download any time.
+        cached, cached_at = load_owners_cache()
+        if cached:
+            self._owners_cache = cached
+            self._owners_loaded_at = cached_at
+            age_h = max(0, int((datetime.datetime.now()
+                                - cached_at).total_seconds() // 3600))
+            self.owners_count_var.set(
+                f"{len(cached)} collections ready (cached {age_h}h ago "
+                f"\u2014 \u201cRefresh all\u201d for latest)")
+        self._reload_owner_lock_names()   # fill the autocomplete suggestions
+
+    def _start_owner_search(self):
+        # a manual search (box / Enter / button) is name+belt based, no lock id
+        self._run_or_load_owners(self.owners_find_var.get().strip(),
+                                 lock_id=None)
+
+    def _run_or_load_owners(self, q, lock_id=None):
+        belt = (self.owners_belt_var.get()
+                if hasattr(self, "owners_belt_var") else "All belts")
+        if not lock_id and not q and belt in ("", "All belts"):
+            messagebox.showinfo(
+                "Owners",
+                "Type part of a lock name, or pick a belt, to search for.")
+            return
+        conn = db()
+        n = conn.execute("SELECT COUNT(*) FROM locks").fetchone()[0]
+        conn.close()
+        if not n:
+            messagebox.showinfo(
+                "Owners",
+                "The lock catalog is empty, so lock names can't be resolved.\n\n"
+                "Update the LPU catalog first (Locks tab \u2192 Update LPU "
+                "catalog).")
+            return
+        self._pending_owner_lock_id = lock_id
+        # Owners come only from the PUBLIC leaderboard (collectors listed there,
+        # with anyone set to Anonymous shown as "Anonymous"). We never query
+        # Firestore to enumerate people who kept their profile off the
+        # leaderboard \u2014 that opt-out is respected.
+        if self._owners_cache:
+            self._run_owner_search(q, lock_id=lock_id)
+            return
+        # need to load all listed collections first
+        self._owners_load_mode = "search"
+        self.owners_btn.config(state="disabled")
+        self.owners_btn.config(text="Loading\u2026")
+        self.owners_refresh_btn.config(state="disabled")
+        self.wishtop_btn.config(state="disabled")
+        self.status.set("Loading every listed LPU collection\u2026 this can "
+                        "take a few minutes the first time.")
+        threading.Thread(target=self._owners_load_worker, args=(q,),
+                         daemon=True).start()
+
+    def _owners_load_worker(self, q):
+        try:
+            owners = load_top_owners(None, lambda s: self.q.put(("status", s)))
+            # warm the Lock Bazaar feed too so ★ for-sale marks are ready
+            try:
+                _bazaar_dataset(lambda s: self.q.put(("status", s)))
+            except Exception:
+                pass
+            self.q.put(("owners_loaded", (owners, q)))
+        except Exception as ex:
+            self.q.put(("owners_error",
+                        ("Couldn't load collections",
+                         "Couldn't load the collections:\n\n" + str(ex))))
+
+    def _run_owner_search(self, q, lock_id=None, bazaar_retry=True):
+        self._owners_last_view = "search"
+        self._owners_last_query = q
+        self._owners_last_lock_id = lock_id
+        conn = db()
+        rows = conn.execute(
+            "SELECT id, name, belt, belt_full, owner_count"
+            " FROM locks").fetchall()
+        conn.close()
+        if lock_id:
+            # exact-id search (from a right-clicked row): match ONLY this lock,
+            # so same-named entries at other belts don't all pull in and list
+            # an owner once per variant.
+            by_id = {r[0]: (r[1], _disp_belt(r[2], r[3]), r[4])
+                     for r in rows}
+            nm, db_belt, cnt0 = by_id.get(lock_id, (q or lock_id, "", None))
+            matches = {lock_id: (nm, db_belt, cnt0)}
+        else:
+            belt = (self.owners_belt_var.get()
+                    if hasattr(self, "owners_belt_var") else "All belts")
+            ff = _fold(q) if q else ""
+            matches = {}
+            for lid, lname, lbelt, lbf, lcnt in rows:
+                if ff and ff not in _fold(lname or ""):
+                    continue
+                # canonical "Black" in the filter matches Black 1..5 (all
+                # stored canonically as "Black").
+                if belt and belt != "All belts" and (lbelt or "") != belt:
+                    continue
+                matches[lid] = (lname, _disp_belt(lbelt, lbf), lcnt)
+        for r in self.owners_tree.get_children():
+            self.owners_tree.delete(r)
+        self._owners_profiles = {}
+        if not matches:
+            self.owners_count_var.set("No locks match that name/belt")
+            self._owners_export = None
+            return
+        # ---- Lock Bazaar overlay: locks currently FOR SALE get a ★ and their
+        # seller is listed as an owner. Uses the (10-min cached) bazaar feed;
+        # if it isn't cached yet, render now and refresh once it arrives.
+        bz_data = self._bazaar_data_fresh()
+        if bz_data is None and bazaar_retry:
+            self._kick_bazaar_refresh(q, lock_id)
+        bz_by_key = {}          # (lname, dbelt) -> {folded seller: entry}
+        if bz_data:
+            for lid, (lname, dbelt, _cnt) in matches.items():
+                # exact LPU-id match first (production rows embed the lock
+                # id), name-token match as a defensive union
+                ents = list(bazaar_entries_for_lock_id(lid, bz_data))
+                have = {_bazaar_entry_key(e) for e in ents}
+                for e in bazaar_entries_for_lock(lname, dbelt, bz_data):
+                    if _bazaar_entry_key(e) not in have:
+                        ents.append(e)
+                if ents:
+                    sellers = bz_by_key.setdefault((lname, dbelt), {})
+                    for e in ents:
+                        sx = _bz_seller(e)
+                        if sx:
+                            sellers.setdefault(_fold(sx), e)
+        bz_by_key = {k: v for k, v in bz_by_key.items() if v}
+        # non-anonymous cached owners by folded display name, to link a bazaar
+        # seller back to their LPU profile / collection size when possible.
+        by_name = {}
+        for o in self._owners_cache:
+            eff = self._owner_effective_name(o)
+            if not o["anon"] and not _is_no_display_name(eff):
+                by_name.setdefault(_fold(eff), o)
+        # collect (lock name, belt, owner, star), deduped so one owner never
+        # repeats for the same displayed lock name, hiding owners with no real
+        # display name. Anonymous owners are never ★-matched by their hidden
+        # name (that would de-anonymize them).
+        seen = set()
+        results = []
+        for o in self._owners_cache:
+            if not self._owner_listable(o):
+                continue
+            owned = o["owned"]
+            for lid, (lname, dbelt, lcnt) in matches.items():
+                if lid in owned:
+                    key = (lname, o["uid"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    star = (not o["anon"] and
+                            _fold(o["name"]) in bz_by_key.get((lname, dbelt), {}))
+                    results.append((lname, dbelt, lcnt, o, star))
+        # sellers on the Bazaar who aren't already listed above for that lock
+        cnt_by_key = {(ln, db_): c for (ln, db_, c) in matches.values()}
+        for (lname, dbelt), sellers in bz_by_key.items():
+            listed = {_fold(o["name"]) for ln, _b, _c, o, _s in results
+                      if ln == lname and not o["anon"]}
+            for sf, e in sellers.items():
+                if sf in listed:
+                    continue
+                cached = by_name.get(sf)
+                seller_name = cached["name"] if cached else _bz_seller(e)
+                # profile link: a cached collections match gives uid (plus
+                # their collection size); otherwise the feed's own sellerId
+                # IS their LPU profile id, so the link still works.
+                uid = (cached["uid"] if cached
+                       else str(e.get("sellerId") or "").strip())
+                key = (lname, uid or ("bz:" + sf))
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append((lname, dbelt, cnt_by_key.get((lname, dbelt)),
+                                {"uid": uid, "name": seller_name, "anon": False,
+                                 "own_count": (cached["own_count"] if cached else None),
+                                 "bz_price": _bz_price(e)},
+                                True))
+        results.sort(key=lambda x: (x[0].lower(), (x[3]["name"] or "").lower()))
+        capped = results[:3000]     # guard against huge belt-only result sets
+        for i, (lname, dbelt, lcnt, o, star) in enumerate(capped):
+            owner_disp = self._owner_display_name(o)
+            lock_disp = lname + (" \u2605" if star else "")
+            rar = _rarity_stars(lcnt)
+            if o.get("own_count") is not None:
+                coll = f'{o["own_count"]} locks'
+            else:
+                coll = o.get("bz_price") or "for sale"
+            iid = self.owners_tree.insert(
+                "", "end",
+                values=(lock_disp, dbelt or "\u2014", rar, owner_disp,
+                        coll, ""),
+                tags=("even" if i % 2 else "odd",))
+            if not o["anon"] and o["uid"]:
+                safe = (self._owner_effective_name(o) or "").replace(" ", "_")
+                self._owners_profiles[iid] = (
+                    f'https://lpubelts.com/#/profile/{o["uid"]}'
+                    f'?name={safe}&collection=Own')
+        n_owners = len({(o["uid"] or ("bz:" + _fold(o["name"] or "")))
+                        for _, _, _c, o, _s in results})
+        n_stars = sum(1 for *_x, s in results if s)
+        star_txt = f", {n_stars} \u2605 on the Bazaar" if n_stars else ""
+        more = " (showing first 3000)" if len(results) > 3000 else ""
+        # When searching a single lock, LPU's own aggregate count is usually
+        # HIGHER than the number of owners we can list, because many owners
+        # keep their profile off the public leaderboard (or their collection
+        # can't be read). Show that total so the gap is explained, not
+        # mysterious.
+        total_txt = ""
+        if len(matches) == 1:
+            lcnt = next(iter(matches.values()))[2]
+            if lcnt is not None and lcnt > n_owners:
+                total_txt = (f" \u00b7 LPU counts {lcnt} total (others aren't "
+                             f"on the public leaderboard)")
+        self.owners_count_var.set(
+            f"{n_owners} listed owner(s) across {len(matches)} matching "
+            f"lock(s){star_txt}{more}{total_txt}")
+        # keep a clean tabular copy for CSV export (one row per lock+owner)
+        exp_rows = []
+        for (lname, dbelt, lcnt, o, star) in capped:
+            if o.get("own_count") is not None:
+                coll = o["own_count"]
+            else:
+                coll = o.get("bz_price") or "For sale on Bazaar"
+            exp_rows.append([lname + (" \u2605" if star else ""), dbelt or "",
+                             _rarity_stars(lcnt),
+                             self._owner_display_name(o),
+                             coll])
+        self._owners_export = {
+            "label": "owner_search",
+            "headers": ["Lock", "Belt", "Rarity", "Owner", "Owns (total)"],
+            "rows": exp_rows,
+        }
+
+    def _refresh_owners(self):
+        q = self.owners_find_var.get().strip() or None
+        self._pending_owner_lock_id = None
+        self._owners_load_mode = "search"
+        self.owners_btn.config(state="disabled")
+        self.owners_btn.config(text="Loading\u2026")
+        self.owners_refresh_btn.config(state="disabled")
+        self.wishtop_btn.config(state="disabled")
+        self.status.set("Refreshing every listed LPU collection\u2026")
+        threading.Thread(target=self._owners_load_worker, args=(q,),
+                         daemon=True).start()
+
+    def _start_wishlist_top_owners(self):
+        """Find the 10 collectors who own the most of MY wishlist. Runs
+        straight away: collections are disk-cached and auto-refreshed at
+        startup, so there is no minutes-long wait to warn about anymore."""
+        conn = db()
+        wish = conn.execute(
+            "SELECT COUNT(*) FROM my_collection WHERE status='wishlist'"
+        ).fetchone()[0]
+        ncat = conn.execute("SELECT COUNT(*) FROM locks").fetchone()[0]
+        conn.close()
+        if not wish:
+            messagebox.showinfo(
+                "Top wishlist owners",
+                "Your wishlist is empty, so there's nothing to match.\n\n"
+                "Import your LPU profile first (so your wishlist loads), then "
+                "try again.")
+            return
+        if not ncat:
+            messagebox.showinfo(
+                "Top wishlist owners",
+                "The lock catalog is empty, so lock names can't be resolved.\n\n"
+                "Update the LPU catalog first (Locks tab \u2192 Update LPU "
+                "catalog).")
+            return
+        if self._owners_cache:
+            self._show_wishlist_top_owners()
+            return
+        # load every listed collection first, then show the top owners
+        self._owners_load_mode = "wishtop"
+        self.owners_btn.config(state="disabled")
+        self.owners_refresh_btn.config(state="disabled")
+        self.wishtop_btn.config(state="disabled", text="Loading\u2026")
+        self.status.set("Loading every listed LPU collection\u2026 this can "
+                        "take a few minutes the first time.")
+        threading.Thread(target=self._owners_load_worker, args=(None,),
+                         daemon=True).start()
+
+    def _show_wishlist_top_owners(self):
+        """Score every cached collector by how many of my wishlist locks they
+        own, then list the top 5 grouped by owner with their matching locks."""
+        conn = db()
+        wish_ids = {r[0] for r in conn.execute(
+            "SELECT lock_id FROM my_collection WHERE status='wishlist'")}
+        info = {r[0]: (r[1], r[2], r[3], r[4]) for r in conn.execute(
+            "SELECT id, name, belt, belt_full, owner_count FROM locks")}
+        conn.close()
+        for r in self.owners_tree.get_children():
+            self.owners_tree.delete(r)
+        self._owners_profiles = {}
+        if not wish_ids:
+            self.owners_count_var.set("Your wishlist is empty")
+            self._owners_export = None
+            return
+        # score each collector by wishlist overlap (skip no-display-name unless
+        # anonymous), keep those with at least one match
+        scored = []
+        for o in self._owners_cache:
+            if not self._owner_listable(o):
+                continue
+            have = wish_ids & o["owned"]
+            if have:
+                scored.append((len(have), o, have))
+        scored.sort(key=lambda x: (-x[0], (x[1]["name"] or "").lower()))
+        top = scored[:10]
+        if not top:
+            self.owners_count_var.set(
+                "No listed collector owns any of your wishlist")
+            self.status.set("No listed collector owns any of your wishlist "
+                            "locks.")
+            self._owners_export = None
+            return
+        row_i = 0
+        export_rows = []
+        self._owners_last_view = "wishtop"
+        for rank, (cnt, o, have) in enumerate(top, 1):
+            owner_disp = self._owner_display_name(o)
+            head = self.owners_tree.insert(
+                "", "end",
+                values=(f"#{rank}   {owner_disp}", "", "", "",
+                        f"{cnt} of your wishlist", ""),
+                tags=("ownergrp",))
+            if not o["anon"] and o["uid"]:
+                safe = (self._owner_effective_name(o) or "").replace(" ", "_")
+                self._owners_profiles[head] = (
+                    f'https://lpubelts.com/#/profile/{o["uid"]}'
+                    f'?name={safe}&collection=Own')
+            # CSV: an owner header row (rank + owner), then one row per lock
+            # below it with rank/owner blank — mirrors the grouped on-screen view
+            export_rows.append([rank, owner_disp, "", "", ""])
+            # their matching wishlist locks, deduped by display name + belt
+            names = set()
+            for lid in have:
+                nm, belt, bf, lcnt = info.get(lid, (lid, "", "", None))
+                names.add((nm or lid, _disp_belt(belt, bf), lcnt))
+            for nm, dbelt, lcnt in sorted(names, key=lambda x: x[0].lower()):
+                rar = _rarity_stars(lcnt)
+                self.owners_tree.insert(
+                    "", "end",
+                    values=(f"        \u2022 {nm}", dbelt or "\u2014", rar,
+                            "", "", ""),
+                    tags=("even" if row_i % 2 else "odd",))
+                row_i += 1
+                export_rows.append(["", "", nm, dbelt or "", rar])
+        self.owners_count_var.set(
+            f"Top {len(top)} collector(s) by wishlist overlap")
+        # grouped tabular copy for CSV export: owner header row, then its locks
+        self._owners_export = {
+            "label": "wishlist_top_owners",
+            "headers": ["Rank", "Owner", "Lock", "Belt", "Rarity"],
+            "rows": export_rows,
+        }
+        self.status.set(
+            f"Top {len(top)} owners for your wishlist ({len(wish_ids)} "
+            "wishlist locks). Double-click an owner to open their profile.")
+
+    def _export_owners_csv(self):
+        """Export the current Owners results (either an owner search or the
+        \u201cTop wishlist owners\u201d list) to a CSV file."""
+        import csv
+        exp = getattr(self, "_owners_export", None)
+        if not exp or not exp.get("rows"):
+            messagebox.showinfo(
+                "Export CSV",
+                "There are no owner results to export yet.\n\n"
+                "Run a search, or use \u201cTop wishlist owners\u201d, first.")
+            return
+        default_name = (exp.get("label", "owners") + "_"
+                        + datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                        + ".csv")
+        path = filedialog.asksaveasfilename(
+            title="Export owners (CSV)",
+            defaultextension=".csv",
+            initialfile=default_name,
+            filetypes=[("CSV file", "*.csv")])
+        if not path:
+            return   # cancelled
+        try:
+            # utf-8-sig so Excel shows accented lock/owner names correctly
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(exp["headers"])
+                w.writerows(exp["rows"])
+        except Exception as ex:
+            messagebox.showerror("Export CSV",
+                                 f"Couldn't write the file:\n{ex}")
+            return
+        self.status.set(f"Exported {len(exp['rows'])} row(s) to {path}.")
+        if messagebox.askyesno(
+                "Export complete",
+                f"Exported {len(exp['rows'])} row(s) to:\n{path}\n\n"
+                "Open the file now?"):
+            try:
+                os.startfile(path)   # Windows: open in Excel
+            except Exception:
+                webbrowser.open("file://" + path.replace("\\", "/"))
+
+    def _owners_open_profile(self, _e):
+        sel = self.owners_tree.selection()
+        if not sel:
+            return
+        url = self._owners_profiles.get(sel[0])
+        if url:
+            webbrowser.open(url)
+
+    def _reload_owner_lock_names(self):
+        """Refill the Owners 'Find lock' autocomplete list from the catalog,
+        honoring the Owners belt filter."""
+        if not hasattr(self, "owners_find_box"):
+            return
+        belt = (self.owners_belt_var.get()
+                if hasattr(self, "owners_belt_var") else "All belts")
+        self.owners_find_box["values"] = self._all_lock_names(belt=belt)
+
+    def _filter_owner_locks(self, evt=None):
+        """Autocomplete for the Owners 'Find lock' box — mirrors the Search
+        tab: narrows the dropdown as you type and inline-completes to the first
+        match (accent-blind)."""
+        keysym = getattr(evt, "keysym", "") if evt is not None else ""
+        if keysym in ("Up", "Down", "Return", "Escape", "Left", "Right",
+                      "Tab", "Home", "End"):
+            return
+        typed = self.owners_find_var.get()
+        belt = (self.owners_belt_var.get()
+                if hasattr(self, "owners_belt_var") else "All belts")
+        matches = self._all_lock_names(typed.strip(), belt=belt)
+        self.owners_find_box["values"] = matches
+        if keysym in ("BackSpace", "Delete") or not typed:
+            return
+        typed_f = _fold(typed)
+        first = next((m for m in matches if _fold(m).startswith(typed_f)), None)
+        if first and _fold(first) != typed_f:
+            try:
+                self.owners_find_var.set(first)
+                self.owners_find_box.icursor(len(typed))
+                self.owners_find_box.selection_range(len(typed), "end")
+            except Exception:
+                pass
+
+    def _on_owners_belt_changed(self):
+        """Belt dropdown changed on the Owners tab: refresh the autocomplete
+        suggestions for that belt, then re-run the search if collections are
+        already loaded."""
+        self._reload_owner_lock_names()
+        if self._owners_cache:
+            self._run_owner_search(self.owners_find_var.get().strip())
+
+    def _show_bazaar_top_sellers(self, bazaar_retry=True):
+        """Rank the Lock Bazaar SELLERS by how many locks from YOUR wishlist
+        they currently have listed for sale — like "Top wishlist owners", but
+        over ACTIVE Bazaar listings instead of collections. Needs no
+        collections download, so it's instant once the feed is cached."""
+        conn = db()
+        wish = conn.execute(
+            "SELECT l.id, l.name, l.belt, l.belt_full, l.owner_count"
+            " FROM my_collection m"
+            " JOIN locks l ON l.id=m.lock_id WHERE m.status='wishlist'"
+        ).fetchall()
+        conn.close()
+        for r in self.owners_tree.get_children():
+            self.owners_tree.delete(r)
+        self._owners_profiles = {}
+        if not wish:
+            self.owners_count_var.set("Your wishlist is empty")
+            self._owners_export = None
+            return
+        data = self._bazaar_data_fresh()
+        if data is None:
+            self.owners_count_var.set("Downloading the Bazaar feed\u2026")
+            if bazaar_retry:
+                self._kick_bazaar_top_refresh()
+            return
+        # group matching ACTIVE listings by seller
+        sellers = {}
+        pair_seen = set()
+        for lid, nm, belt, bf, lcnt in wish:
+            dbelt = _disp_belt(belt, bf)
+            # exact LPU-id match first, name tokens as a defensive union
+            ents = list(bazaar_entries_for_lock_id(lid, data))
+            have = {_bazaar_entry_key(e) for e in ents}
+            for e in bazaar_entries_for_lock(nm, dbelt, data):
+                if _bazaar_entry_key(e) not in have:
+                    ents.append(e)
+            for e in ents:
+                sx = _bz_seller(e)
+                if not sx:
+                    continue
+                pk = (_fold(sx), nm)
+                if pk in pair_seen:
+                    continue
+                pair_seen.add(pk)
+                d = sellers.setdefault(_fold(sx), {"name": sx, "sid": "",
+                                                   "items": []})
+                if not d["sid"] and e.get("sellerId"):
+                    d["sid"] = str(e.get("sellerId")).strip()
+                d["items"].append((nm, dbelt, lcnt, _bz_price(e)))
+        if not sellers:
+            self.owners_count_var.set(
+                "No active Bazaar listing matches your wishlist")
+            self.status.set("No active Lock Bazaar listing matches your "
+                            "wishlist right now.")
+            self._owners_export = None
+            return
+        ranked = sorted(sellers.values(),
+                        key=lambda d: (-len(d["items"]),
+                                       d["name"].lower()))[:10]
+        self._owners_last_view = "bazaar_top"
+        # profile links: cached collections match first (has uid), else the
+        # feed's own sellerId IS their LPU profile id.
+        by_name = {}
+        for o in getattr(self, "_owners_cache", []):
+            eff = self._owner_effective_name(o)
+            if not o["anon"] and not _is_no_display_name(eff):
+                by_name.setdefault(_fold(eff), o)
+        export_rows = []
+        row_i = 0
+        for rank, d in enumerate(ranked, 1):
+            cnt = len(d["items"])
+            head = self.owners_tree.insert(
+                "", "end",
+                values=(f"#{rank}   {d['name']} \u2605", "", "", "",
+                        f"{cnt} of your wishlist for sale", ""),
+                tags=("ownergrp",))
+            cached = by_name.get(_fold(d["name"]))
+            uid = (cached["uid"] if cached else d["sid"])
+            if uid:
+                safe = d["name"].replace(" ", "_")
+                self._owners_profiles[head] = (
+                    f"https://lpubelts.com/#/profile/{uid}"
+                    f"?name={safe}&collection=Own")
+            export_rows.append([rank, d["name"], "", "", "", ""])
+            for nm, dbelt, lcnt, price in sorted(d["items"],
+                                                 key=lambda x: x[0].lower()):
+                rar = _rarity_stars(lcnt)
+                self.owners_tree.insert(
+                    "", "end",
+                    values=(f"        \u2022 {nm}", dbelt or "\u2014", rar,
+                            "", price or "for sale", ""),
+                    tags=("even" if row_i % 2 else "odd",))
+                row_i += 1
+                export_rows.append(["", "", nm, dbelt or "", rar,
+                                    price or ""])
+        self.owners_count_var.set(
+            f"Top {len(ranked)} Bazaar seller(s) with your wishlist for sale")
+        self.status.set(
+            f"Top {len(ranked)} Lock Bazaar sellers for your wishlist "
+            f"({len(wish)} wishlist locks). Double-click a seller to open "
+            "their LPU profile.")
+        self._owners_export = {
+            "label": "bazaar_top_sellers",
+            "headers": ["Rank", "Seller", "Lock", "Belt", "Rarity",
+                        "Price"],
+            "rows": export_rows,
+        }
+
+    def _owner_display_name(self, o):
+        """Label for a collector in the Owners tab. Anonymous collectors are
+        ALWAYS shown as 'Anonymous' \u2014 this tool never reveals a hidden name."""
+        if o.get("anon"):
+            return "Anonymous"
+        return o.get("name") or "(unknown)"
+
+    def _owner_listable(self, o):
+        """Whether a non-anonymous collector has any real name to show. (Anon
+        collectors are handled by their own display path and are always
+        listable.)"""
+        if o.get("anon"):
+            return True
+        return not _is_no_display_name(self._owner_effective_name(o))
+
+    def _owner_effective_name(self, o):
+        """The collector's public display name \u2014 '' for anonymous or unknown."""
+        if o.get("anon"):
+            return ""
+        name = (o.get("name") or "").strip()
+        return "" if _is_no_display_name(name) else name
+
+    def _kick_bazaar_top_refresh(self):
+        """Fetch the Bazaar feed in the background, then re-run the
+        Top-Bazaar-sellers view once. Never loops."""
+        if getattr(self, "_bazaar_fetching", False):
+            return
+        self._bazaar_fetching = True
+
+        def w():
+            try:
+                _bazaar_dataset(lambda s: self.q.put(("status", s)))
+            except Exception:
+                pass
+            finally:
+                self._bazaar_fetching = False
+                self.q.put(("bazaar_top_rerun", None))
+        threading.Thread(target=w, daemon=True).start()
 
     # ---------- SEARCH TAB ----------
     def _build_search_tab(self, wrap):
@@ -6526,14 +7527,14 @@ class LockHunter(tk.Tk):
         # few US cents). You'll be asked for a key the first time you enable it.
         self.ai_var = tk.BooleanVar(value=False)
         self.ai_check = ttk.Checkbutton(
-            opts, text="Also use AI web search (uses your paid Anthropic API key)",
+            opts, text="Also use AI web search",
             variable=self.ai_var, command=self._toggle_ai_search)
         self.ai_check.pack(side="left", padx=(0, 18))
         # Lock-only filter: drop same-name non-lock listings (e.g. "Sol"
         # sunglasses when searching the "Sol 2500" lock). On by default.
         self.lockonly_var = tk.BooleanVar(value=True)
         self.lockonly_check = ttk.Checkbutton(
-            opts, text="Lock results only (filter out same-name non-locks)",
+            opts, text="Lock results only",
             variable=self.lockonly_var,
             command=self._toggle_lock_filter)
         self.lockonly_check.pack(side="left", padx=(0, 18))
@@ -6589,6 +7590,13 @@ class LockHunter(tk.Tk):
         self.filter_var = tk.StringVar()
         fe = ttk.Entry(fstrip, textvariable=self.filter_var, width=22)
         fe.pack(side="left"); fe.bind("<KeyRelease>", lambda *_: self._refresh_table())
+        # Live count so the result set is never a mystery ("N results", and
+        # "showing first N of M" only in the extreme case the safety ceiling
+        # is hit).
+        self.results_count_var = tk.StringVar(value="")
+        tk.Label(fstrip, textvariable=self.results_count_var, bg=self.C_PANEL,
+                 fg=self.C_MUTE, font=("Segoe UI", 10)).pack(side="left",
+                                                             padx=(10, 0))
         # Condition dropdown and "Hide non-shippable results" removed in
         # 4.7.5 — all results always show. Vars kept as inert defaults so any
         # stray references stay harmless.
@@ -6696,8 +7704,15 @@ class LockHunter(tk.Tk):
         # for every wishlist lock. Can take a while and return a lot.
         self.hunt_wishlist_btn = FlatButton(
             ctrl, "Search for Wishlist Locks",
-            command=self._toggle_wishlist_hunt, kind="outline")
+            command=lambda: self._toggle_wishlist_hunt(False), kind="outline")
         self.hunt_wishlist_btn.pack(side="right", padx=(0, 10))
+        # "New Wishlist Search" — the same hunt, but shows only listings that
+        # are new since the last wishlist search. Greyed out until a first
+        # wishlist search has laid down a baseline to diff against.
+        self.hunt_new_btn = FlatButton(
+            ctrl, "New Wishlist Search",
+            command=lambda: self._toggle_wishlist_hunt(True), kind="outline")
+        self.hunt_new_btn.pack(side="right", padx=(0, 10))
         self._sync_hunt_wishlist_button()
         self.locks_count_var = tk.StringVar(value="")
         tk.Label(ctrl, textvariable=self.locks_count_var, bg=self.C_PANEL, fg=self.C_MUTE,
@@ -7018,25 +8033,94 @@ class LockHunter(tk.Tk):
 
     def _toggle_ai_search(self):
         """Ticking 'Also use AI web search' turns on the optional paid AI
-        pass. It spends the user's own Anthropic API credits, so make the
-        cost explicit and confirm before enabling; a Claude API key is also
-        required, so prompt for one if none is saved. Unticking is always
-        free and needs no confirmation."""
+        pass. With no key saved, open the key-entry dialog (which explains
+        what this is, that it's optional, and that it costs money). With a
+        key already saved, just confirm the cost. Unticking is always free
+        and needs no confirmation."""
         if not self.ai_var.get():
             return
+        if not self.cfg.get("api_key"):
+            self._ai_key_dialog()
+            return
         ok = messagebox.askyesno(
-            "Use AI web search? (costs API credits)",
-            "The normal search is free. Turning this ON also asks an "
-            "Anthropic (Claude) AI model to web-search for each lock, which "
-            "can find listings the built-in sites don't cover.\n\n"
-            "This uses YOUR Anthropic API key and costs a small amount of "
-            "API credit each run (usually a few US cents). You'll need to "
-            "enter an API key if you haven't already.\n\n"
+            "Use AI web search?",
+            "AI web search is OPTIONAL — the normal search (eBay, ~46 "
+            "marketplaces, Facebook, Lock Bazaar) is free and already runs "
+            "without it.\n\n"
+            "Turning this on ALSO asks Anthropic's Claude to web-search each "
+            "lock. That can surface extra listings the built-in sites miss, "
+            "but it spends a small amount of your own Anthropic API credit "
+            "each search (typically a few US cents).\n\n"
             "Enable AI web search?")
         if not ok:
             self.ai_var.set(False)
-            return
-        self._prompt_api_key(force=False)
+
+    def _ai_key_dialog(self):
+        """Key-entry popup shown when 'Also use AI web search' is ticked with
+        no saved key. Explains the feature (optional, costs money, can add
+        results), takes the sk-ant- key, and has a Help button that opens the
+        step-by-step guide for getting one. Cancel / empty leaves the AI
+        checkbox off."""
+        win = tk.Toplevel(self)
+        win.title("AI web search — Claude API key")
+        win.configure(bg=self.C_PANEL)
+        win.transient(self)
+        win.grab_set()
+        win.resizable(False, False)
+        tk.Label(win, text="Turn on AI web search?",
+                 bg=self.C_PANEL, fg=self.C_ACCENT,
+                 font=("Segoe UI Semibold", 13)).pack(anchor="w",
+                                                      padx=20, pady=(16, 4))
+        blurb = (
+            "This is OPTIONAL. The normal search — eBay, ~46 marketplaces, "
+            "Facebook and the LPU Lock Bazaar — is free and runs without it.\n\n"
+            "Turning it on ALSO asks Anthropic's Claude AI to web-search each "
+            "lock, which can find extra listings the built-in sites miss. It "
+            "uses your own Anthropic API key and costs a small amount of API "
+            "credit per search (typically a few US cents).\n\n"
+            "Paste your API key below (it starts with sk-ant-). Your key is "
+            "stored on this computer only.")
+        tk.Label(win, text=blurb, bg=self.C_PANEL, fg=self.C_TEXT,
+                 justify="left", wraplength=470,
+                 font=("Segoe UI", 10)).pack(anchor="w", padx=20, pady=(0, 10))
+        key_in = tk.StringVar()
+        ent = ttk.Entry(win, textvariable=key_in, width=52, show="\u2022")
+        ent.pack(padx=20, fill="x")
+        show_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(win, text="Show characters", variable=show_var,
+                        command=lambda: ent.config(
+                            show="" if show_var.get() else "\u2022")
+                        ).pack(anchor="w", padx=20, pady=(6, 2))
+        btns = tk.Frame(win, bg=self.C_PANEL)
+        btns.pack(fill="x", padx=20, pady=(10, 16))
+
+        def _done(save):
+            key = key_in.get().strip() if save else ""
+            if key:
+                self.key_var.set(key)
+                self.cfg["api_key"] = key
+                save_cfg(self.cfg)
+                if hasattr(self, "status"):
+                    self.status.set("API key saved — AI web search enabled.")
+                log("API key saved (AI web search dialog)")
+            else:
+                # no key -> AI search can't run; leave the box unticked
+                self.ai_var.set(False)
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        FlatButton(btns, "Help — what is this / get a key",
+                   command=self._show_api_key_help,
+                   kind="ghost").pack(side="left")
+        FlatButton(btns, "Cancel", command=lambda: _done(False),
+                   kind="ghost").pack(side="right", padx=(8, 0))
+        FlatButton(btns, "OK", command=lambda: _done(True),
+                   kind="primary").pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", lambda: _done(False))
+        ent.focus_set()
+        win.wait_window()
 
     def _search_lock_from_locks_tab(self, name):
         # jump to the Search tab, load the lock, and kick off a live search
@@ -7046,18 +8130,19 @@ class LockHunter(tk.Tk):
         self._start_search()
 
     # ---- batch "hunt my whole wishlist" (free search only) ----------------
-    def _toggle_wishlist_hunt(self):
-        """The button does double duty: start a hunt, or cancel one in
-        progress."""
+    def _toggle_wishlist_hunt(self, new_only=False):
+        """Each wishlist button does double duty: start its hunt, or cancel a
+        hunt already in progress."""
         if getattr(self, "_wishlist_hunt_running", False):
             self._cancel_wishlist_hunt()
         else:
-            self._start_wishlist_hunt()
+            self._start_wishlist_hunt(new_only)
 
     def _cancel_wishlist_hunt(self):
         # signal the worker to stop after the current lock; reflect it in the UI
         self._wishlist_hunt_cancel = True
-        btn = getattr(self, "hunt_wishlist_btn", None)
+        btn = (getattr(self, "_hunt_active_btn", None)
+               or getattr(self, "hunt_wishlist_btn", None))
         if btn is not None:
             btn.config(text="Cancelling…")
             btn.set_enabled(False)
@@ -7069,17 +8154,22 @@ class LockHunter(tk.Tk):
             btn.set_enabled(bool(on))
 
     def _sync_hunt_wishlist_button(self):
-        """Restore the button to its idle 'search' state, enabled only while
-        the Show filter is 'My wishlist' and no hunt is running. While a hunt
-        IS running the button stays a live 'Cancel hunt' control — leave it."""
+        """Restore BOTH wishlist buttons to idle. Enabled only in the
+        'All locks'/'My wishlist' views with no hunt running; the "New Wishlist
+        Search" button also requires a baseline from a previous wishlist
+        search. While a hunt IS running the buttons are the live Cancel /
+        disabled pair set by _start_wishlist_hunt — leave them."""
         if getattr(self, "_wishlist_hunt_running", False):
             return
-        btn = getattr(self, "hunt_wishlist_btn", None)
-        if btn is not None:
-            btn.config(text="Search for Wishlist Locks")
-        on = (self.locks_show_var.get() in ("All locks", "My wishlist")
-              and not getattr(self, "_wishlist_hunt_running", False))
-        self._set_hunt_wishlist_enabled(on)
+        view_ok = self.locks_show_var.get() in ("All locks", "My wishlist")
+        wb = getattr(self, "hunt_wishlist_btn", None)
+        if wb is not None:
+            wb.config(text="Search for Wishlist Locks")
+            wb.set_enabled(view_ok)
+        nb = getattr(self, "hunt_new_btn", None)
+        if nb is not None:
+            nb.config(text="New Wishlist Search")
+            nb.set_enabled(view_ok and _wl_has_baseline())
 
     def _wishlist_locks(self, belt):
         """Names of all wishlisted locks, optionally limited to one belt."""
@@ -7095,11 +8185,13 @@ class LockHunter(tk.Tk):
         conn.close()
         return [r[0] for r in rows if r[0]]
 
-    def _start_wishlist_hunt(self):
+    def _start_wishlist_hunt(self, new_only=False):
         if self.locks_show_var.get() not in ("All locks", "My wishlist"):
             return
         if getattr(self, "_wishlist_hunt_running", False):
             return
+        if new_only and not _wl_has_baseline():
+            return   # "New" needs a prior wishlist search to diff against
         belt = self.locks_belt_var.get()
         names = self._wishlist_locks(belt)
         if not names:
@@ -7110,32 +8202,35 @@ class LockHunter(tk.Tk):
                 + ". Import your profile or pick a different belt.")
             return
         beltmsg = "" if belt in ("", "All belts") else f" ({belt} belt)"
-        # Three-way prompt so the filter choice is explicit for every hunt
-        # (independent of the Search-tab checkbox):
-        #   Yes    -> lock results only (filter same-name non-locks)
-        #   No     -> show everything (no filter)
-        #   Cancel -> don't run
-        choice = messagebox.askyesnocancel(
-            "Hunt my wishlist",
-            f"Search all {len(names)} wishlist lock(s){beltmsg} using the "
-            f"FREE search (eBay + marketplaces, no API credits).\n\n"
-            f"This scans many sites per lock, so it can take a while and may "
-            f"return a lot of results. Results appear on the Search tab as "
-            f"they come in.\n\n"
-            f"Filter to LOCK results only?\n"
-            f"   • Yes  = locks only (recommended — hides same-name non-locks)\n"
-            f"   • No   = show everything\n"
-            f"   • Cancel = don't run")
-        if choice is None:
-            return   # Cancel
-        lock_only = bool(choice)   # Yes -> True, No -> False
+        # Simple confirm — the scope is chosen by WHICH button was clicked
+        # (standard vs new), and wishlist hunts are always locks-only now (the
+        # show-everything toggle lives on single-lock searches).
+        scope = ("only listings NEW since your last wishlist search"
+                 if new_only else "all listings")
+        if not messagebox.askyesno(
+                "Hunt my wishlist",
+                f"Search {scope} for all {len(names)} wishlist lock(s)"
+                f"{beltmsg}?\n\n"
+                "Uses the FREE search (eBay + ~46 marketplaces + Lock Bazaar, "
+                "no API credits) and shows locks only. It scans many sites per "
+                "lock, so it can take a while — results appear on the Search "
+                "tab as they arrive."):
+            return
+        # Load the previous run's findings now (baseline for "only new"); a
+        # fresh baseline is written when THIS run finishes.
+        self._wl_baseline = _wl_load_seen()
         self._wishlist_hunt_running = True
         self._wishlist_hunt_cancel = False
-        # turn the button into a clickable "Cancel hunt" control
-        btn = getattr(self, "hunt_wishlist_btn", None)
-        if btn is not None:
-            btn.config(text="Cancel hunt")
-            btn.set_enabled(True)
+        # the button that started the hunt becomes "Cancel hunt"; the other
+        # wishlist button greys out for the duration
+        active = self.hunt_new_btn if new_only else self.hunt_wishlist_btn
+        other = self.hunt_wishlist_btn if new_only else self.hunt_new_btn
+        self._hunt_active_btn = active
+        if active is not None:
+            active.config(text="Cancel hunt")
+            active.set_enabled(True)
+        if other is not None:
+            other.set_enabled(False)
         # show results on the Search tab and clear the table once up front
         self._show_tab("Search")
         try:
@@ -7149,18 +8244,25 @@ class LockHunter(tk.Tk):
         self._show_scan_overlay(True)
         belt_arg = "" if belt in ("", "All belts") else belt
         threading.Thread(target=self._wishlist_hunt_worker,
-                         args=(names, belt_arg, lock_only), daemon=True).start()
+                         args=(names, belt_arg, True, new_only),
+                         daemon=True).start()
 
-    def _wishlist_hunt_worker(self, names, belt, lock_only=True):
+    def _wishlist_hunt_worker(self, names, belt, lock_only=True,
+                              new_only=False):
         """Run the FREE search for each wishlist lock in turn, accumulating
         results into the listings table (no clear between locks). Free search =
         eBay scrape + all marketplace probes + Bazaar; never calls Claude.
         `lock_only` sets the lock-context filter for this whole batch,
         independent of the Search-tab checkbox; the checkbox state is restored
-        when the hunt finishes."""
+        when the hunt finishes. When `new_only`, listings whose URL was already
+        found in the PREVIOUS wishlist search (the baseline) are not shown —
+        only genuinely new ones — but every listing found is still recorded so
+        the baseline advances to this run's full state."""
         global _LOCK_CONTEXT_FILTER
         prev_filter = _LOCK_CONTEXT_FILTER
         _LOCK_CONTEXT_FILTER = bool(lock_only)
+        baseline = getattr(self, "_wl_baseline", set())
+        all_urls = set()
         total = len(names)
         grand = 0
         try:
@@ -7242,6 +8344,11 @@ class LockHunter(tk.Tk):
                 try:
                     conn = db()
                     for it in results:
+                        url = it.get("url", "")
+                        if url:
+                            all_urls.add(url)          # advance the baseline
+                        if new_only and url and url in baseline:
+                            continue                   # seen last time -> hide
                         try:
                             if _insert_listing_row(conn, lock_name, it):
                                 stored += 1
@@ -7260,9 +8367,14 @@ class LockHunter(tk.Tk):
                     f"(total {grand}).")))
                 # refresh the visible table as results accumulate
                 self.q.put(("refresh_table", None))
+            # Record this run's full findings as the new baseline (skip if the
+            # hunt was cancelled, so a partial run doesn't poison "only new").
+            if not getattr(self, "_wishlist_hunt_cancel", False):
+                _wl_save_seen(all_urls)
             self.q.put(("status", log(
-                f"Wishlist hunt done: {grand} listing(s) across {total} "
-                f"lock(s).")))
+                f"Wishlist hunt done: {grand} "
+                + ("new " if new_only else "")
+                + f"listing(s) across {total} lock(s).")))
         except Exception as ex:
             self.q.put(("status", log(f"Wishlist hunt FAILED: {ex}")))
         finally:
@@ -7324,6 +8436,9 @@ class LockHunter(tk.Tk):
     def _reload_lock_names(self):
         names = self._all_lock_names()
         self.lock_box["values"] = names
+        # keep the Owners tab autocomplete in sync with catalog changes too
+        if hasattr(self, "owners_find_box"):
+            self._reload_owner_lock_names()
         # Default the Lock box to BLANK. Only clear it if the current text is
         # no longer a valid option (e.g. after switching belts); never auto-
         # pick the first lock.
@@ -8124,6 +9239,49 @@ class LockHunter(tk.Tk):
                     self.status.set(title)
                     messagebox.showerror(title, body)
 
+                elif kind == "owners_loaded":
+                    owners, oq = payload
+                    self._owners_cache = owners
+                    self._owners_loaded_at = datetime.datetime.now()
+                    try:
+                        save_owners_cache(owners)
+                    except Exception:
+                        pass
+                    self.owners_btn.config(state="normal")
+                    self.owners_btn.config(text="Search owners")
+                    self.owners_refresh_btn.config(state="normal")
+                    self.wishtop_btn.config(state="normal",
+                                            text="Top wishlist owners")
+                    self.status.set(f"Loaded {len(owners)} collections.")
+                    mode = getattr(self, "_owners_load_mode", "search")
+                    self._owners_load_mode = "search"
+                    if mode == "wishtop":
+                        self._show_wishlist_top_owners()
+                    else:
+                        lid = getattr(self, "_pending_owner_lock_id", None)
+                        if oq or lid:
+                            self.status.set(
+                                f"Loaded {len(owners)} collections. "
+                                "Searching\u2026")
+                            self._run_owner_search(oq, lock_id=lid)
+                elif kind == "owners_error":
+                    self.owners_btn.config(state="normal")
+                    self.owners_btn.config(text="Search owners")
+                    self.owners_refresh_btn.config(state="normal")
+                    self.wishtop_btn.config(state="normal",
+                                            text="Top wishlist owners")
+                    self._owners_load_mode = "search"
+                    title, body = payload
+                    self.status.set(title)
+                    messagebox.showerror(title, body)
+                elif kind == "owners_rerun":
+                    rq, rlid = payload
+                    if getattr(self, "_owners_cache", None):
+                        self._run_owner_search(rq, lock_id=rlid,
+                                               bazaar_retry=False)
+                elif kind == "bazaar_top_rerun":
+                    self._show_bazaar_top_sellers(bazaar_retry=False)
+
                 elif kind == "bazaar_news":
                     lines = payload
                     n = len(lines)
@@ -8266,7 +9424,7 @@ class LockHunter(tk.Tk):
         if f:
             qy += " AND lock_name LIKE ?"; params.append(f"%{f}%")
         qy += (" ORDER BY (CASE WHEN site='LPU Lock Bazaar' THEN 0 ELSE 1 END),"
-               " found_at DESC LIMIT 5000")
+               " found_at DESC LIMIT 10000")
         try:
             conn = db()
             rows = list(conn.execute(qy, params))
@@ -8399,8 +9557,10 @@ class LockHunter(tk.Tk):
         if f:
             qy += " AND lock_name LIKE ?"; params.append(f"%{f}%")
         # Default order: LPU Lock Bazaar first, then newest first.
+        _RESULT_CEILING = 10000   # safety ceiling only; real result sets are
+        #                           far smaller and show in full
         qy += (" ORDER BY (CASE WHEN site='LPU Lock Bazaar' THEN 0 ELSE 1 END),"
-               " found_at DESC LIMIT 500")
+               f" found_at DESC LIMIT {_RESULT_CEILING}")
         conn = db()
         rows = list(conn.execute(qy, params))
         # Rarity stars per catalog lock NAME for the Rarity column. When the
@@ -8421,6 +9581,16 @@ class LockHunter(tk.Tk):
             if nm:
                 self._lpu_img_by_name[_fold(nm)] = img
         conn.close()
+
+        # Update the visible count. If we somehow hit the ceiling, say so
+        # honestly instead of silently truncating.
+        _n = len(rows)
+        if hasattr(self, "results_count_var"):
+            if _n >= _RESULT_CEILING:
+                self.results_count_var.set(f"showing first {_n:,} results")
+            else:
+                self.results_count_var.set(
+                    f"{_n:,} result" + ("" if _n == 1 else "s"))
 
         usd_on = bool(getattr(self, "usd_var", None) and self.usd_var.get())
         rates = _rates_cache["rates"] if usd_on else None
