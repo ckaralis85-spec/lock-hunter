@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "5.0.1"
+VERSION = "5.0.2"
 
 
 
@@ -337,60 +337,35 @@ def _refresh_stable_icons():
             except OSError:
                 pass
 
-        if changed and os.name == "nt":
-            # One-shot nudge so Windows drops its cached (old) icon.
-            try:
-                import subprocess
-                subprocess.run(["ie4uinit.exe", "-show"], check=False,
-                               creationflags=0x08000000)  # CREATE_NO_WINDOW
-            except Exception:
-                pass
-        if changed and hashed_path:
-            _refresh_desktop_shortcuts(hashed_path)
+        # NOTE: earlier versions nudged Windows here with `ie4uinit.exe -show`
+        # and re-pointed existing desktop shortcuts by spawning PowerShell.
+        # Both were REMOVED on purpose: a frozen (PyInstaller) exe launching
+        # ie4uinit and non-interactive PowerShell at startup is a textbook
+        # antivirus / Microsoft-Defender-ML behavioural trigger (it was the
+        # cause of the "Trojan:Win32/Wacatac" false positive). Keeping the
+        # icon FILES in sync above is enough; shortcut creation/refresh is the
+        # installer's and build script's job, and Windows refreshes a
+        # content-hashed icon path on its own. The app no longer spawns any
+        # child process at runtime.
+        _ = hashed_path  # retained for the file-sync above; intentionally unused
     except Exception:
         pass
     return changed
 
-def _refresh_desktop_shortcuts(icon_path):
-    """Re-point every EXISTING "Lock Hunter.lnk" desktop shortcut at THIS
-    running exe with the given (content-hashed) icon. Only acts when running
-    as the frozen Windows exe; the PowerShell work runs in a background
-    thread so startup never waits on it. Existing shortcuts only — creating
-    one is the installer's / build script's job. Never raises."""
-    try:
-        if os.name != "nt" or not getattr(sys, "frozen", False):
-            return
-        def q(s):   # single-quote for PowerShell ('' escapes a quote)
-            return str(s).replace("'", "''")
-        exe = os.path.abspath(sys.executable)
-        wd = os.path.dirname(exe)
-        ps = (
-            "$ErrorActionPreference='SilentlyContinue';"
-            "$w=New-Object -ComObject WScript.Shell;"
-            "$dirs=@([Environment]::GetFolderPath('Desktop'),"
-            "\"$env:USERPROFILE\\Desktop\","
-            "\"$env:USERPROFILE\\OneDrive\\Desktop\","
-            "\"$env:PUBLIC\\Desktop\") | Select-Object -Unique;"
-            "foreach($d in $dirs){"
-            "$p=Join-Path $d 'Lock Hunter.lnk';"
-            "if(Test-Path $p){"
-            "$s=$w.CreateShortcut($p);"
-            "$s.TargetPath='" + q(exe) + "';"
-            "$s.WorkingDirectory='" + q(wd) + "';"
-            "$s.IconLocation='" + q(icon_path) + ",0';"
-            "$s.Save()}}"
-        )
-        def _run():
-            try:
-                import subprocess
-                subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                               check=False, timeout=30,
-                               creationflags=0x08000000)  # CREATE_NO_WINDOW
-            except Exception:
-                pass
-        threading.Thread(target=_run, daemon=True).start()
-    except Exception:
-        pass
+def _refresh_desktop_shortcuts(icon_path=None):
+    """Intentionally a no-op.
+
+    Older builds re-pointed existing "Lock Hunter.lnk" desktop shortcuts by
+    spawning a non-interactive PowerShell process (WScript.Shell COM) from the
+    running exe. A frozen PyInstaller exe launching PowerShell at startup is a
+    well-known antivirus / Microsoft-Defender-ML behavioural trigger and was
+    the direct cause of the "Trojan:Win32/Wacatac" false positive on download.
+
+    Shortcut creation and icon assignment are handled by the installer
+    ("Install LockHunter.bat") and the developer build script, which run once
+    with the user's consent — not by the app on every launch. This function is
+    kept as a harmless stub so any residual caller stays safe."""
+    return
 
 APP_DIR = os.path.join(os.path.expanduser("~"), ".lockhunter")
 DB_PATH = os.path.join(APP_DIR, "lockhunter.db")
@@ -1551,7 +1526,8 @@ def _norm_sizes(s):
 _BRAND_ALIASES = [
     {"mul-t-lock", "mult-lock", "multlock", "mtl", "mul t lock"},
     {"cawi", "wittkopp", "carl wittkopp"},
-    {"s&g", "s and g", "sargent and greenleaf", "sargent greenleaf", "sng"},
+    {"s&g", "s & g", "s and g", "sargent & greenleaf",
+     "sargent and greenleaf", "sargent greenleaf", "sng"},
     {"burg-wachter", "burg wachter", "burgwachter", "burg"},
     {"zeiss ikon", "zi ikon", "zeiss", "zi"},
     {"assa abloy", "assa"},
@@ -2084,7 +2060,9 @@ def _parse_ricardo(html):
     return out
 
 def search_ricardo_direct(lock_name, status_cb, deep=False):
-    q = urllib.parse.quote_plus(lock_name.strip())
+    # Path segment (not a ?query): spaces must be %20, not '+' — quote(), not
+    # quote_plus(), or a multi-word term searches for the literal '+'.
+    q = urllib.parse.quote(lock_name.strip())
     url = f"https://www.ricardo.ch/de/s/{q}"
     return _generic_probe("Ricardo", url, _parse_ricardo, lock_name,
                           status_cb, "found via direct Ricardo search")
@@ -2483,7 +2461,8 @@ def _parse_buyee(html):
     return out
 
 def search_buyee_direct(lock_name, status_cb, deep=False):
-    q = urllib.parse.quote_plus(lock_name.strip())
+    # Path segment (not a ?query): spaces must be %20, not '+'.
+    q = urllib.parse.quote(lock_name.strip())
     url = f"https://buyee.jp/item/search/query/{q}"
     return _generic_probe("Buyee (JP)", url, _parse_buyee, lock_name,
                           status_cb, "found via direct Buyee search")
@@ -2632,17 +2611,22 @@ def search_olx_direct(lock_name, status_cb, deep=False, origin=""):
     default to olx.pl since that's where most collectible European lock
     listings on OLX appear."""
     domain = _OLX_DOMAINS.get(origin, "www.olx.pl")
-    q = urllib.parse.quote_plus(lock_name.strip())
+    # Path segment (not a ?query): spaces must be %20, not '+'.
+    q = urllib.parse.quote(lock_name.strip())
     url = f"https://{domain}/oferty/q-{q}/"
     return _generic_probe(f"OLX ({domain.replace('www.olx.', '')})", url,
                           lambda h: _parse_olx(h, domain), lock_name,
                           status_cb, "found via direct OLX search")
 
 # ---- helpers reused by the parsers below -----------------------------------
-def _anchor_scan(html, href_re, base, note_price_window=400):
+def _anchor_scan(html, href_re, base, note_price_window=400, keep_query=False):
     """Generic anchor-based scan: find listing links matching href_re, take the
     anchor text or aria-label as the title, and a nearby price token. Returns
-    (title, price, absolute_url) tuples. Defensive; used as a fallback."""
+    (title, price, absolute_url) tuples. Defensive; used as a fallback.
+
+    By default the query string is stripped (most sites carry tracking junk
+    there). Pass keep_query=True for sites whose listing ID lives in the query
+    (e.g. Finn's ?finnkode=, Taobao's ?id=) so links stay clickable."""
     out, seen = [], set()
     for m in re.finditer(href_re, html, re.S | re.I):
         href = m.group(1)
@@ -2658,8 +2642,10 @@ def _anchor_scan(html, href_re, base, note_price_window=400):
             continue
         seen.add(key)
         url = href if href.startswith("http") else base + href
+        if not keep_query:
+            url = url.split("?")[0]
         out.append((title, _mp_price_near(html, m.end(), note_price_window),
-                    url.split("?")[0]))
+                    url))
         if len(out) >= 50:
             break
     return out
@@ -2774,7 +2760,7 @@ def _parse_finn(html):
         return _enrich_prices_from_html(out, html)
     return _anchor_scan(
         html, r'<a[^>]+href="(https://www\.finn\.no/[^"]*?finnkode=(\d+)[^"]*)"[^>]*>(.*?)</a>',
-        "https://www.finn.no")
+        "https://www.finn.no", keep_query=True)
 
 def search_finn_direct(lock_name, status_cb, deep=False):
     q = urllib.parse.quote_plus(lock_name.strip())
@@ -2866,7 +2852,7 @@ def search_avito_direct(lock_name, status_cb, deep=False):
 def _parse_taobao(html):
     return _anchor_scan(
         html, r'<a[^>]+href="(//item\.taobao\.com/[^"]*?id=(\d+)[^"]*)"[^>]*>(.*?)</a>',
-        "https:")
+        "https:", keep_query=True)
 
 def search_taobao_direct(lock_name, status_cb, deep=False):
     q = urllib.parse.quote_plus(lock_name.strip())
@@ -3497,7 +3483,12 @@ def _parse_price(price, currency=""):
         num = num.replace(other, "").replace(dec, ".")
     elif "," in num:
         tail = num.rsplit(",", 1)[-1]
-        num = num.replace(",", ".") if len(tail) == 2 else num.replace(",", "")
+        # A trailing group of 1 or 2 digits after the ONLY comma is a decimal
+        # ("8,5" -> 8.5, "10,50" -> 10.50); thousands groups are always 3
+        # digits, so a 3-digit tail with more commas/digits means grouping.
+        num = (num.replace(",", ".")
+               if (len(tail) in (1, 2) and num.count(",") == 1)
+               else num.replace(",", ""))
     elif "." in num:
         parts = num.split(".")
         if len(parts[-1]) == 3 and all(len(p) <= 3 for p in parts):
@@ -3621,6 +3612,13 @@ def init_db():
             _lcols = [r[1] for r in conn.execute(f"PRAGMA table_info({_tbl})")]
             if "image_url" not in _lcols:
                 conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN image_url TEXT")
+        # 5.0.2: per-listing ship-to verdict for the "ships to me" display
+        # filter. '' = not checked yet, 'yes'/'no'/'unknown' after probing the
+        # eBay listing page. Stored (not applied destructively) so the filter
+        # can be toggled on/off after a scan without re-searching.
+        _lcols = [r[1] for r in conn.execute("PRAGMA table_info(listings)")]
+        if "shipto" not in _lcols:
+            conn.execute("ALTER TABLE listings ADD COLUMN shipto TEXT")
         conn.execute("""CREATE TABLE IF NOT EXISTS searches(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             lock_name TEXT, condition TEXT, exclude_pickup INTEGER,
@@ -6547,6 +6545,12 @@ class LockHunter(tk.Tk):
             font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 0))
 
     def _start_compare(self):
+        # Guard against a second run while one is in flight. Disabling the
+        # button isn't enough: the URL entry's <Return> binding still fires,
+        # which could launch overlapping workers whose results race and
+        # overwrite each other (showing URL A's data while the box says B).
+        if getattr(self, "_compare_running", False):
+            return
         url = self.compare_url_var.get().strip()
         if not url:
             messagebox.showinfo(
@@ -6576,6 +6580,7 @@ class LockHunter(tk.Tk):
                 "profile first: go to the Locks tab and click "
                 "\u201cUpdate profile\u201d.")
             return
+        self._compare_running = True
         self.compare_btn.config(state="disabled")
         self.compare_btn.config(text="Comparing\u2026")
         self.compare_who_var.set("")
@@ -7221,7 +7226,13 @@ class LockHunter(tk.Tk):
         if self._owners_cache:
             self._run_owner_search(q, lock_id=lock_id)
             return
+        # Guard against a duplicate load: the buttons get disabled below, but
+        # the Find box's <Return> binding still fires, which could start a
+        # SECOND multi-minute leaderboard+Firestore sweep in parallel.
+        if getattr(self, "_owners_loading", False):
+            return
         # need to load all listed collections first
+        self._owners_loading = True
         self._owners_load_mode = "search"
         self.owners_btn.config(state="disabled")
         self.owners_btn.config(text="Loading\u2026")
@@ -7942,13 +7953,11 @@ class LockHunter(tk.Tk):
             values=("(not set)",) + tuple(_COUNTRY_META))
         self.country_box.pack(side="left", padx=(0, 14))
         self.country_box.bind("<<ComboboxSelected>>", self._on_country_changed)
+        # The "ships to me" filter checkbox itself now lives on the RESULTS
+        # strip, next to "Show USD estimate" (built in _build_ui below), so it
+        # can be toggled while looking at results. The variable is created here
+        # so country changes / early code can reference it safely.
         self.shipto_var = tk.BooleanVar(value=bool(self.cfg.get("shipto_only")))
-        self.shipto_check = ttk.Checkbutton(
-            opts,
-            text="Only eBay listings that ship to me (opens each listing — slower)",
-            variable=self.shipto_var, command=self._toggle_shipto)
-        self.shipto_check.pack(side="left")
-        self._apply_shipto_state()
         # LPU Lock Bazaar is always included; kept as hidden state (no checkbox).
         self.bazaar_var = tk.BooleanVar(value=True)
         # Extended search is now ALWAYS ON (no toggle) — deeper pages, more
@@ -8007,6 +8016,15 @@ class LockHunter(tk.Tk):
         self.usd_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(fstrip, text="Show USD estimate", variable=self.usd_var,
                         command=self._usd_toggled).pack(side="left", padx=4)
+        # "Ships to me" — a reversible display filter (needs a country set on
+        # the Search tab). Toggling ON opens each eBay listing to check, then
+        # hides only the ones that definitely won't ship here; toggling OFF
+        # shows them again. Works before or after a scan.
+        self.shipto_check = ttk.Checkbutton(
+            fstrip, text="Only eBay that ships to me",
+            variable=self.shipto_var, command=self._toggle_shipto)
+        self.shipto_check.pack(side="left", padx=4)
+        self._apply_shipto_state()
         FlatButton(fstrip, "Open log", command=lambda: webbrowser.open(LOG_PATH),
                    kind="subtle").pack(side="right")
         FlatButton(fstrip, "Clear results", command=self._clear_results,
@@ -8330,15 +8348,44 @@ class LockHunter(tk.Tk):
         else:
             self.q.put(("locks_thumb", (name, None)))
 
+    @staticmethod
+    def _cached_image_path(url):
+        """Return the on-disk cache path for an image URL, downloading it first
+        if needed. The download is ATOMIC (temp file + os.replace) so a crash
+        or disk-full mid-write can never leave a truncated file that would then
+        poison this image forever (Image.open failing on every later view). A
+        pre-existing file that won't open is treated as corrupt and re-fetched
+        once."""
+        fn = os.path.join(IMG_DIR, re.sub(r"[^A-Za-z0-9.]", "_", url)[-80:])
+
+        def _download():
+            r = requests.get(url, timeout=30,
+                             headers={"User-Agent": "LockHunter/1.0"})
+            r.raise_for_status()
+            tmp = fn + ".part"
+            with open(tmp, "wb") as f:
+                f.write(r.content)
+            os.replace(tmp, fn)    # atomic: fn is either old, or fully new
+
+        if not os.path.exists(fn):
+            _download()
+        else:
+            # Guard against an already-poisoned (truncated) cache file from an
+            # older build: if it won't open, drop it and fetch a clean copy.
+            try:
+                with Image.open(fn) as _probe:
+                    _probe.verify()
+            except Exception:
+                try:
+                    os.remove(fn)
+                except OSError:
+                    pass
+                _download()
+        return fn
+
     def _fetch_locks_thumb(self, url, name):
         try:
-            fn = os.path.join(IMG_DIR, re.sub(r"[^A-Za-z0-9.]", "_", url)[-80:])
-            if not os.path.exists(fn):
-                r = requests.get(url, timeout=30,
-                                 headers={"User-Agent": "LockHunter/1.0"})
-                r.raise_for_status()
-                with open(fn, "wb") as f:
-                    f.write(r.content)
+            fn = self._cached_image_path(url)
             img = Image.open(fn)
             if img.mode in ("RGBA", "LA", "P"):
                 img = img.convert("RGBA")
@@ -8421,18 +8468,37 @@ class LockHunter(tk.Tk):
             "that deliver there." if name else "Country cleared.")
 
     def _toggle_shipto(self):
-        self.cfg["shipto_only"] = bool(self.shipto_var.get())
+        """The 'ships to me' box is a reversible DISPLAY filter now. Turning it
+        ON hides eBay rows already known not to ship here and kicks a
+        background probe to classify the rest; turning it OFF just shows
+        everything again. Works before OR after a scan, as often as you like."""
+        on = bool(self.shipto_var.get())
+        self.cfg["shipto_only"] = on
         save_cfg(self.cfg)
+        self._refresh_table()          # instant: hide/show what we already know
+        if on:
+            if not _SHIPTO["name"]:
+                self.status.set(
+                    "Pick your country (top of the Search tab) first — the "
+                    "ship-to filter needs to know where you are.")
+            else:
+                self._kick_shipto_probe()   # classify the not-yet-checked rows
 
     def _apply_shipto_state(self):
-        """The per-listing check needs a country to check against."""
+        """The per-listing check needs a country to check against. With no
+        country the filter is disabled and forced off (and any rows it was
+        hiding are shown again)."""
         has = bool(_SHIPTO["name"])
         try:
             self.shipto_check.config(state=("normal" if has else "disabled"))
         except Exception:
             pass
-        if not has:
+        if not has and self.shipto_var.get():
             self.shipto_var.set(False)
+            try:
+                self._refresh_table()
+            except Exception:
+                pass
 
     def _toggle_fb_search(self):
         """Ticking 'Also search Facebook Marketplace' turns on the optional
@@ -8809,7 +8875,14 @@ class LockHunter(tk.Tk):
         except Exception as ex:
             self.q.put(("status", log(f"Wishlist hunt FAILED: {ex}")))
         finally:
-            _LOCK_CONTEXT_FILTER = prev_filter   # restore checkbox state
+            # Restore to whatever the checkbox says NOW — not the value we
+            # captured at hunt start — so a toggle made DURING the hunt isn't
+            # silently reverted (which would leave later single searches
+            # filtering opposite to the visible checkbox).
+            try:
+                _LOCK_CONTEXT_FILTER = bool(self.lockonly_var.get())
+            except Exception:
+                _LOCK_CONTEXT_FILTER = prev_filter
             self._wishlist_hunt_running = False
             self.q.put(("wishlist_hunt_done", None))
 
@@ -9034,12 +9107,7 @@ class LockHunter(tk.Tk):
 
     def _fetch_thumb(self, url, name):
         try:
-            fn = os.path.join(IMG_DIR, re.sub(r"[^A-Za-z0-9.]", "_", url)[-80:])
-            if not os.path.exists(fn):
-                r = requests.get(url, timeout=30, headers={"User-Agent": "LockHunter/1.0"})
-                r.raise_for_status()
-                with open(fn, "wb") as f:
-                    f.write(r.content)
+            fn = self._cached_image_path(url)
             img = Image.open(fn)
             # flatten transparency onto the panel color so PNGs don't show black
             if img.mode in ("RGBA", "LA", "P"):
@@ -9337,6 +9405,17 @@ class LockHunter(tk.Tk):
                 os.remove(LOG_PATH)
         except Exception as ex:
             errors.append(f"log: {ex}")
+        # 2b) delete the wishlist "already seen" baseline. Otherwise a full
+        # reset would silently keep it, and the first "New Wishlist Search"
+        # after re-importing a profile would diff against pre-reset data and
+        # hide currently-listed wishlist locks as "already seen" — contrary to
+        # this dialog's promise of a clean slate.
+        try:
+            if os.path.exists(_wl_seen_path()):
+                os.remove(_wl_seen_path())
+            self._wl_baseline = set()
+        except Exception as ex:
+            errors.append(f"wishlist baseline: {ex}")
         # 3) clear the saved profile + API key from config
         try:
             for k in ("api_key", "profile_url", "profile_uid", "profile_synced",
@@ -9430,52 +9509,93 @@ class LockHunter(tk.Tk):
                 self.ai_var.get(), use_fb)
         threading.Thread(target=self._worker, args=args, daemon=True).start()
 
-    def _filter_ebay_shipto(self, results, cb):
-        """Open each eBay listing page (capped) and keep only ones that ship
-        to the user's country. Non-eBay rows pass through untouched; pages
-        that can't be fetched or parsed are KEPT, with their titles labelled
-        "ship-to unconfirmed" — never hidden on doubt."""
-        country = _SHIPTO["name"]
-        idxs = [i for i, r in enumerate(results)
-                if str(r.get("site", "")).startswith("eBay") and r.get("url")]
-        if not idxs:
-            return results
-        check = idxs[:40]          # politeness cap
-        cb(f"Ship-to check: opening {len(check)} eBay listing(s) "
-           f"(do they ship to {country}?)…")
-        sess = _ebay_session()
-        drop = set()
-        n_unk = 0
-        for k, i in enumerate(check, 1):
-            url = results[i]["url"]
-            dom = urllib.parse.urlparse(url).netloc or "www.ebay.com"
-            verdict = None
-            try:
-                st, text = _ebay_get(sess, url, dom)
-                if st == 200 and text:
-                    verdict = _ebay_ships_to(text)
-            except Exception:
-                verdict = None
-            if verdict is False:
-                drop.add(i)
-            elif verdict is None:
-                n_unk += 1
-                t = str(results[i].get("title") or "")
-                if t and "ship-to unconfirmed" not in t:
-                    results[i]["title"] = t + "  — ship-to unconfirmed"
-            if k % 8 == 0:
-                cb(f"  ship-to check {k}/{len(check)}…")
-            time.sleep(0.35)
-        kept = [r for i, r in enumerate(results) if i not in drop]
-        skipped = len(idxs) - len(check)
-        self.q.put(("status", log(
-            f"Ship-to {country}: removed {len(drop)} of {len(check)} checked "
-            f"eBay listing(s)"
-            + (f"; {n_unk} undetermined — kept and labelled"
-               if n_unk else "")
-            + (f"; {skipped} beyond the {len(check)}-listing cap kept"
-               if skipped else "") + ".")))
-        return kept
+    def _kick_shipto_probe(self):
+        """Start (once) the background job that opens each not-yet-checked eBay
+        listing and records whether it ships to the user's country. Guarded so
+        toggling the checkbox rapidly can't launch overlapping probes."""
+        if not _SHIPTO["name"]:
+            return
+        if getattr(self, "_shipto_probing", False):
+            return
+        self._shipto_probing = True
+        threading.Thread(target=self._shipto_probe_worker, daemon=True).start()
+
+    def _shipto_probe_worker(self):
+        """Open each eBay listing that has no ship-to verdict yet (capped for
+        politeness), read its "Ships to" section, and STORE the verdict on the
+        row ('yes'/'no'/'unknown'). Non-destructive: nothing is deleted, so the
+        display filter can be toggled on and off freely. Undeterminable pages
+        are recorded 'unknown' and are never hidden."""
+        try:
+            country = _SHIPTO["name"]
+            sess = None
+            n_yes = n_no = n_unk = done = 0
+            SAFETY_CAP = 400          # never probe more than this in one drain
+            # Drain in polite batches until no eBay row is left unclassified.
+            # Looping (rather than one 40-row shot) means rows added by a
+            # search that finished WHILE this probe was running still get
+            # classified in the same run — no need for the user to re-toggle.
+            while done < SAFETY_CAP:
+                conn = db()
+                try:
+                    rows = list(conn.execute(
+                        "SELECT url FROM listings WHERE site LIKE 'eBay%'"
+                        " AND url IS NOT NULL AND url<>''"
+                        " AND (shipto IS NULL OR shipto='')"
+                        " LIMIT 40"))
+                finally:
+                    conn.close()
+                urls = [r[0] for r in rows]
+                if not urls:
+                    break
+                if sess is None:
+                    self.q.put(("status", log(
+                        f"Ship-to check: opening eBay listing(s) "
+                        f"(do they ship to {country}?)…")))
+                    sess, _tls = _ebay_session()
+                for url in urls:
+                    dom = urllib.parse.urlparse(url).netloc or "www.ebay.com"
+                    verdict = None
+                    try:
+                        st, text = _ebay_get(sess, url, dom)
+                        if st == 200 and text:
+                            verdict = _ebay_ships_to(text)
+                    except Exception:
+                        verdict = None
+                    val = "yes" if verdict is True else (
+                        "no" if verdict is False else "unknown")
+                    if val == "yes":
+                        n_yes += 1
+                    elif val == "no":
+                        n_no += 1
+                    else:
+                        n_unk += 1
+                    try:
+                        c2 = db()
+                        c2.execute("UPDATE listings SET shipto=? WHERE url=?",
+                                   (val, url))
+                        c2.commit()
+                        c2.close()
+                    except sqlite3.Error:
+                        pass
+                    done += 1
+                    if done % 8 == 0:
+                        self.q.put(("status", log(
+                            f"  ship-to check: {done} listing(s) so far…")))
+                    if done >= SAFETY_CAP:
+                        break
+                    time.sleep(0.35)
+                # refresh as each batch lands so hidden rows disappear promptly
+                self.q.put(("shipto_done", None))
+            if done:
+                self.q.put(("status", log(
+                    f"Ship-to {country}: {n_no} won't ship here (hidden), "
+                    f"{n_yes} confirmed, {n_unk} undetermined (kept).")))
+        except Exception as ex:
+            self.q.put(("status", log(f"Ship-to check failed: {ex}")))
+        finally:
+            self._shipto_probing = False
+            self.q.put(("shipto_done", None))
 
     def _worker(self, key, lock_name, cond, excl, bazaar, deep=False, belt="",
                 sales="Both", use_ai=True, use_fb=False):
@@ -9626,15 +9746,14 @@ class LockHunter(tk.Tk):
                         f"Facebook Marketplace error: {ex}")))
             # Verify each listing URL is live (drops 404/403/ended-eBay etc).
             before = len(results)
-            # Optional ship-to filter (single-lock searches, eBay rows only):
-            # opens each eBay listing page and keeps ones that ship to the
-            # user's country. Undeterminable pages are KEPT.
-            if (getattr(self, "shipto_var", None) is not None
-                    and self.shipto_var.get() and _SHIPTO["name"]):
-                try:
-                    results = self._filter_ebay_shipto(results, cb)
-                except Exception as ex:
-                    self.q.put(("status", log(f"Ship-to check failed: {ex}")))
+            # NOTE: the ship-to check is NO LONGER a destructive pre-scan step.
+            # It now runs on demand as a reversible DISPLAY filter (the "ships
+            # to me" checkbox on the results strip): toggling it probes eBay
+            # rows, stores a per-listing verdict, and hides only the ones that
+            # definitively don't ship here — so it can be turned on/off after a
+            # scan without re-searching. The eBay Browse API deliveryCountry
+            # filter (applied earlier when a country is set) still pre-narrows
+            # the API path for free.
             results = verify_listings(
                 results, lambda s: self.q.put(("status", s)))
             if before != len(results):
@@ -9679,6 +9798,16 @@ class LockHunter(tk.Tk):
     # ---- event pump
     def _poll(self):
         try:
+            self._poll_once()
+        finally:
+            # ALWAYS reschedule. If a queue handler raised, the exception is
+            # reported by Tk's report_callback_exception, but the pump must
+            # keep running or every future background result would be stranded
+            # (buttons stuck disabled, overlays never clearing) until restart.
+            self.after(150, self._poll)
+
+    def _poll_once(self):
+        try:
             while True:
                 kind, payload = self.q.get_nowait()
                 if kind == "status":
@@ -9686,6 +9815,13 @@ class LockHunter(tk.Tk):
                 elif kind == "done":
                     self.search_btn.config(state="normal")
                     self._show_scan_overlay(False)
+                    self._refresh_table()
+                    # If the "ships to me" filter is on, classify the fresh
+                    # eBay rows now so the filter reflects this search too.
+                    if (getattr(self, "shipto_var", None) is not None
+                            and self.shipto_var.get() and _SHIPTO["name"]):
+                        self._kick_shipto_probe()
+                elif kind == "shipto_done":
                     self._refresh_table()
                 elif kind == "scanmsg":
                     if hasattr(self, "scan_overlay"):
@@ -9712,6 +9848,7 @@ class LockHunter(tk.Tk):
                         self._refresh_locks_table()
                 elif kind == "compare_results":
                     who, their_total, their_wish_total, rows = payload
+                    self._compare_running = False
                     self.compare_btn.config(state="normal")
                     self.compare_btn.config(text="Compare")
                     self._populate_compare(who, their_total,
@@ -9720,6 +9857,7 @@ class LockHunter(tk.Tk):
                         f"Compared {who}'s collection \u2014 {len(rows)} "
                         f"match(es) on your wishlist.")
                 elif kind == "compare_error":
+                    self._compare_running = False
                     self.compare_btn.config(state="normal")
                     self.compare_btn.config(text="Compare")
                     title, body = payload
@@ -9728,6 +9866,7 @@ class LockHunter(tk.Tk):
 
                 elif kind == "owners_loaded":
                     owners, oq = payload
+                    self._owners_loading = False
                     self._owners_cache = owners
                     self._owners_loaded_at = datetime.datetime.now()
                     try:
@@ -9752,6 +9891,7 @@ class LockHunter(tk.Tk):
                                 "Searching\u2026")
                             self._run_owner_search(oq, lock_id=lid)
                 elif kind == "owners_error":
+                    self._owners_loading = False
                     self.owners_btn.config(state="normal")
                     self.owners_btn.config(text="Search owners")
                     self.owners_refresh_btn.config(state="normal")
@@ -9849,7 +9989,6 @@ class LockHunter(tk.Tk):
                             self.bazaar_btn.set_highlight(self.C_BAZAAR)
         except queue.Empty:
             pass
-        self.after(150, self._poll)
 
     def _clear_results(self):
         # Wipe all stored search results (the listings table) and refresh.
@@ -10043,6 +10182,16 @@ class LockHunter(tk.Tk):
         f = self.filter_var.get().strip()
         if f:
             qy += " AND lock_name LIKE ?"; params.append(f"%{f}%")
+        # "Ships to me" display filter: when ticked, hide only eBay rows we've
+        # CONFIRMED won't ship to the user's country (shipto='no'). Unknown /
+        # unchecked rows and every non-eBay row stay visible — never hide on
+        # doubt. Reversible: unticking shows them again with no re-search.
+        if (getattr(self, "shipto_var", None) is not None
+                and self.shipto_var.get() and _SHIPTO["name"]):
+            # COALESCE so a NULL (not-yet-probed) shipto is treated as "keep",
+            # not hidden — SQL NULL would otherwise make NOT(...) evaluate NULL
+            # and drop the row.
+            qy += " AND NOT (site LIKE 'eBay%' AND COALESCE(shipto,'')='no')"
         # Default order: LPU Lock Bazaar first, then newest first.
         _RESULT_CEILING = 10000   # safety ceiling only; real result sets are
         #                           far smaller and show in full
@@ -10169,19 +10318,31 @@ class LockHunter(tk.Tk):
                          daemon=True).start()
 
     def _thumb_fetch(self, url, iid):
-        photo = None
+        # Fetch + decode off the main thread, but NEVER build the Tk PhotoImage
+        # here — Tcl/Tk objects created on a background thread can crash the
+        # process ("Tcl_AsyncDelete: async handler deleted by the wrong
+        # thread") when they are later GC'd. Hand the decoded PIL image to the
+        # main thread via after(); the PhotoImage is built there (same pattern
+        # as _poll for result thumbnails).
+        im = None
         try:
             import io
             r = requests.get(url, timeout=10,
                              headers={"User-Agent": _BROWSER_UA})
             if r.status_code == 200:
                 im = Image.open(io.BytesIO(r.content))
+                im.load()
                 im.thumbnail((240, 240))
-                photo = ImageTk.PhotoImage(im)
         except Exception:
-            photo = None
+            im = None
 
         def apply():
+            photo = None
+            if im is not None:
+                try:
+                    photo = ImageTk.PhotoImage(im)   # built on the main thread
+                except Exception:
+                    photo = None
             if photo is not None:
                 self._thumb_cache[url] = photo
             if (self._thumb_row == iid and self._thumb_win is not None
@@ -11509,6 +11670,15 @@ _EMBEDDED_ASSETS = {
 if __name__ == "__main__":
     try:
         LockHunter().mainloop()
+        # Normal exit (the user closed the window). Background scraping runs on
+        # ThreadPoolExecutor workers, which are NON-daemon — Python would join
+        # them at interpreter shutdown, keeping the process (and the taskbar /
+        # Task-Manager entry) alive for the minutes an in-flight probe or AI
+        # call takes to finish. All state is written eagerly (config on every
+        # change, DB committed per operation), so exit hard and immediately.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
     except SystemExit:
         raise
     except BaseException:
