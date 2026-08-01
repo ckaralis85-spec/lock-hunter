@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "5.0.2"
+VERSION = "5.0.3"
 
 
 
@@ -11676,8 +11676,15 @@ if __name__ == "__main__":
         # Task-Manager entry) alive for the minutes an in-flight probe or AI
         # call takes to finish. All state is written eagerly (config on every
         # change, DB committed per operation), so exit hard and immediately.
-        sys.stdout.flush()
-        sys.stderr.flush()
+        # NOTE: in a --windowed PyInstaller build there is no console, so
+        # sys.stdout / sys.stderr are None — guard the flush or it raises
+        # AttributeError and pops the crash dialog on every close.
+        for _stream in (sys.stdout, sys.stderr):
+            try:
+                if _stream is not None:
+                    _stream.flush()
+            except Exception:
+                pass
         os._exit(0)
     except SystemExit:
         raise
@@ -11699,5 +11706,11 @@ if __name__ == "__main__":
             _mb.showerror("Lock Hunter — startup error", _m)
             _root.destroy()
         except Exception:
-            traceback.print_exc()
+            # Windowed build has no console (sys.stderr is None), so guard the
+            # last-ditch print too.
+            try:
+                if sys.stderr is not None:
+                    traceback.print_exc()
+            except Exception:
+                pass
         sys.exit(1)
