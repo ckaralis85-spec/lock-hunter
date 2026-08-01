@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "4.7.8"
+VERSION = "5.0.1"
 
 
 
@@ -53,12 +53,48 @@ import re
 import sqlite3
 import sys
 import threading
+import time
 import traceback
 import queue
 import datetime
 import webbrowser
 import urllib.parse
 import concurrent.futures
+
+# Headless build helper: `python lock_hunter.py --write-version-file [out.txt]`
+# emits a PyInstaller VSVersionInfo file so the built .exe carries proper
+# Windows version metadata (CompanyName / ProductName / FileVersion). Bare
+# PyInstaller onefile exes with NO version resource are a classic antivirus /
+# Safe-Browsing heuristic trigger; embedding real metadata (plus code signing)
+# is one of the main mitigations.
+if __name__ == "__main__" and len(sys.argv) > 1 \
+        and sys.argv[1] == "--write-version-file":
+    _out = sys.argv[2] if len(sys.argv) > 2 else "version_info.txt"
+    _p = (VERSION.split(".") + ["0", "0", "0"])[:3]
+    _t = "({0}, {1}, {2}, 0)".format(*(int(x or 0) for x in _p))
+    _vi = (
+        "VSVersionInfo(\n"
+        "  ffi=FixedFileInfo(\n"
+        "    filevers=" + _t + ", prodvers=" + _t + ",\n"
+        "    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1,\n"
+        "    subtype=0x0, date=(0, 0)),\n"
+        "  kids=[\n"
+        "    StringFileInfo([StringTable('040904B0', [\n"
+        "      StringStruct('CompanyName', 'Lock Hunter (open source)'),\n"
+        "      StringStruct('FileDescription',\n"
+        "                   'Lock Hunter - LPU lock marketplace search'),\n"
+        "      StringStruct('FileVersion', '" + VERSION + "'),\n"
+        "      StringStruct('InternalName', 'LockHunter'),\n"
+        "      StringStruct('OriginalFilename', 'LockHunter.exe'),\n"
+        "      StringStruct('ProductName', 'Lock Hunter'),\n"
+        "      StringStruct('ProductVersion', '" + VERSION + "'),\n"
+        "      StringStruct('LegalCopyright',\n"
+        "                   'MIT License - "
+        "github.com/ckaralis85-spec/lock-hunter')])]),\n"
+        "    VarFileInfo([VarStruct('Translation', [1033, 1200])])])\n")
+    with open(_out, "w", encoding="ascii") as _f:
+        _f.write(_vi)
+    sys.exit(0)
 
 # Headless build helper: `python lock_hunter.py --extract-icon [out.ico]` writes
 # the embedded LPU icon to a file and exits, WITHOUT importing tkinter or
@@ -724,7 +760,7 @@ def _parse_ebay_search_loose(html):
         # any styled-text span whose text starts with a currency
         r'su-styled-text[^"]*"[^>]*>\s*(' + _CUR + r'\s?\d[\d.,]*)',
         # bare currency-prefixed amount ($12.34, EUR 12,34, US $5.00)
-        r'(' + _CUR + r'\s?\d[\d.,]*)',
+        r'(?<![A-Za-z])(' + _CUR + r'\s?\d[\d.,]*)',
         # European suffix style (12,34 €)
         r'(\d[\d.,]*\s?(?:€|EUR))',
     )
@@ -1079,6 +1115,16 @@ def _parse_ebay_api_items(payload, marketplace):
             out.append((title, price, url.split("?")[0], cond, loc, img))
     return out
 
+def _ebay_api_params(lock_name, limit):
+    """Browse-API query params. When the user's country is set, filter to
+    listings that actually DELIVER there (deliveryCountry) — free precision
+    the scrape path can't match."""
+    p = {"q": lock_name.strip(), "limit": str(limit)}
+    if _SHIPTO["iso2"]:
+        p["filter"] = "deliveryCountry:" + _SHIPTO["iso2"]
+    return p
+
+
 def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
     """Search eBay via the official Browse API across the origin marketplace
     first, then the global ones. Returns listing dicts shaped exactly like the
@@ -1105,7 +1151,7 @@ def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
                 headers={"Authorization": f"Bearer {tok}",
                          "X-EBAY-C-MARKETPLACE-ID": mkt,
                          "Content-Type": "application/json"},
-                params={"q": lock_name.strip(), "limit": str(limit)},
+                params=_ebay_api_params(lock_name, limit),
                 timeout=30)
             if r.status_code == 401:
                 # token expired mid-run — refresh once and retry this market
@@ -1116,8 +1162,9 @@ def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
                 r = requests.get(
                     EBAY_BROWSE_URL,
                     headers={"Authorization": f"Bearer {tok}",
-                             "X-EBAY-C-MARKETPLACE-ID": mkt},
-                    params={"q": lock_name.strip(), "limit": str(limit)},
+                             "X-EBAY-C-MARKETPLACE-ID": mkt,
+                             "Content-Type": "application/json"},
+                    params=_ebay_api_params(lock_name, limit),
                     timeout=30)
             if r.status_code != 200:
                 status_cb(f"  {mkt}: HTTP {r.status_code}")
@@ -1281,7 +1328,7 @@ _MP_UA = {
 # ("249 kr", "12 000 Ft", "3400円"). Codes cover eBay/JSON-LD style prices
 # ("SEK 249"); symbols cover on-page prices.
 _MP_CUR_PRE = (r"US\s*\$|AU\s*\$|CA\s*\$|C\s*\$|NZ\s*\$|HK\s*\$|R\$|"
-               r"€|£|\$|¥|₪|₽|₺|₴|Kč|zł|Ft|лв|руб|грн|Fr\.|"
+               r"€|£|\$|¥|₪|₽|₺|₴|Kč|zł|Ft|лв|руб|грн|"
                r"EUR|GBP|USD|CHF|SEK|NOK|DKK|ISK|PLN|CZK|HUF|RON|RSD|BGN|"
                r"TRY|ILS|RUB|UAH|JPY|CNY|CAD|AUD|NZD|BRL|BYN")
 _MP_CUR_SUF = (r"€|£|\$|¥|₪|₽|₺|₴|kr\.?|Kč|zł|Ft|лв|дин|din|lei|руб|Br|円|元|"
@@ -1301,7 +1348,8 @@ def _mp_price_near(text, idx, window=240):
     seg = (seg.replace("&nbsp;", " ").replace("&#160;", " ")
               .replace("\u00a0", " ").replace("\u202f", " ")
               .replace("\xa0", " "))
-    m = re.search(r"((?:" + _MP_CUR_PRE + r")\s?" + _MP_AMT + r")", seg)
+    m = re.search(r"(?<![A-Za-z])((?:" + _MP_CUR_PRE + r")\s?"
+                  + _MP_AMT + r")", seg)
     if not m:
         m = re.search(r"(" + _MP_AMT + r"\s?(?:" + _MP_CUR_SUF + r"))"
                       r"(?![A-Za-z])", seg)
@@ -1310,6 +1358,53 @@ def _mp_price_near(text, idx, window=240):
     if not m:
         return ""
     return re.sub(r"\s+", " ", m.group(1)).strip()
+
+def _find_listing_link_pos(html, url):
+    """Position of a listing's REAL anchor in the page markup. The same path
+    usually also appears inside a head-of-page JSON-LD blob, so a naive find()
+    would land there and read a neighbouring card's price — anchor-context
+    (href=) is required, with a last-resort of the LAST occurrence (markup
+    follows the head)."""
+    path = url.split("://")[-1].split("?")[0]
+    path = path[path.find("/"):] if "/" in path else "/" + path
+    for probe in (f'href="{path}', f"href='{path}"):
+        i = html.find(probe)
+        if i != -1:
+            return i
+    keys = []
+    tail = path.rstrip("/").split("/")[-1]
+    if len(tail) >= 4:          # 1-3 char tails match all over the page
+        keys.append(tail)
+    m = re.search(r"\d{6,}", path)
+    if m and m.group(0) not in keys:
+        keys.append(m.group(0))
+    for k in keys:
+        for mm in re.finditer(re.escape(k), html):
+            if "href=" in html[max(0, mm.start() - 160):mm.start()]:
+                return mm.start()
+    for k in keys:
+        i = html.rfind(k)
+        if i != -1:
+            return i
+    return -1
+
+
+def _enrich_prices_from_html(items, html):
+    """For (title, price, url[, ...]) tuples whose price is EMPTY — typical
+    when a site's JSON-LD ItemList names products but carries no offers
+    (Tradera does this) — find each listing's own link in the page markup and
+    read the price token next to it. Entries that already have a price are
+    untouched."""
+    fixed = []
+    for t in items:
+        title, price, url = t[0], t[1], t[2]
+        if not price and url:
+            i = _find_listing_link_pos(html, url)
+            if i != -1:
+                price = _mp_price_near(html, i, 700)
+        fixed.append((title, price) + tuple(t[2:]))
+    return fixed
+
 
 def _jsonld_products(html):
     """Yield product-ish dicts from any <script type=ld+json> blocks."""
@@ -2068,7 +2163,7 @@ def _parse_tradera(html):
                         urlp if urlp.startswith("http")
                         else "https://www.tradera.com" + urlp))
     if out:
-        return out
+        return _enrich_prices_from_html(out, html)
     for m in re.finditer(r'<a[^>]+href="(/item/\d+/(\d+)/[^"]*)"[^>]*>(.*?)</a>',
                          html, re.S | re.I):
         href, _id, inner = m.group(1), m.group(2), m.group(3)
@@ -2579,7 +2674,7 @@ def _parse_tori(html):
             out.append((name, _offer_price(node),
                         urlp if urlp.startswith("http") else "https://www.tori.fi" + urlp))
     if out:
-        return out
+        return _enrich_prices_from_html(out, html)
     return _anchor_scan(
         html, r'<a[^>]+href="(https://www\.tori\.fi/[^"]*?/(\d+)[^"]*)"[^>]*>(.*?)</a>',
         "https://www.tori.fi")
@@ -2612,7 +2707,7 @@ def _parse_gumtree(html, domain):
             out.append((name, _offer_price(node),
                         urlp if urlp.startswith("http") else f"https://{domain}" + urlp))
     if out:
-        return out
+        return _enrich_prices_from_html(out, html)
     return _anchor_scan(
         html, r'<a[^>]+href="(/p/[^"]*?/(\d+))"[^>]*>(.*?)</a>',
         f"https://{domain}")
@@ -2642,7 +2737,7 @@ def _parse_wallapop(html):
         if name and urlp and "/item/" in urlp:
             out.append((name, _offer_price(node), urlp.split("?")[0]))
     if out:
-        return out
+        return _enrich_prices_from_html(out, html)
     return _anchor_scan(
         html, r'<a[^>]+href="(https://(?:es\.)?wallapop\.com/item/([a-z0-9-]+))"[^>]*>(.*?)</a>',
         "https://es.wallapop.com")
@@ -2676,7 +2771,7 @@ def _parse_finn(html):
             out.append((name, _offer_price(node),
                         urlp if urlp.startswith("http") else "https://www.finn.no" + urlp))
     if out:
-        return out
+        return _enrich_prices_from_html(out, html)
     return _anchor_scan(
         html, r'<a[^>]+href="(https://www\.finn\.no/[^"]*?finnkode=(\d+)[^"]*)"[^>]*>(.*?)</a>',
         "https://www.finn.no")
@@ -2731,7 +2826,7 @@ def _parse_liveauctioneers(html):
             out.append((name, _offer_price(node),
                         urlp if urlp.startswith("http") else "https://www.liveauctioneers.com" + urlp))
     if out:
-        return out
+        return _enrich_prices_from_html(out, html)
     return _anchor_scan(
         html, r'<a[^>]+href="(/item/(\d+)[^"]*)"[^>]*>(.*?)</a>',
         "https://www.liveauctioneers.com")
@@ -2790,7 +2885,7 @@ def _ld_or_anchor(html, base, href_re):
             out.append((name, _offer_price(node),
                         urlp if urlp.startswith("http") else base + urlp))
     if out:
-        return out
+        return _enrich_prices_from_html(out, html)
     return _anchor_scan(html, href_re, base)
 
 # ---- Bland.is (Iceland) ---------------------------------------------------
@@ -4767,6 +4862,115 @@ def save_profile(uid, own, wish):
     finally:
         conn.close()
 
+# ------------------------------------------------------- ship-to country
+# The user's country: applied automatically as an eBay Browse-API
+# deliveryCountry filter whenever set, and used by the optional per-listing
+# "ships to me" page check. Aliases are lowercase forms that appear in eBay's
+# shipping section across its language sites.
+_COUNTRY_META = {
+    "United States": ("US", ("united states", "usa", "u.s.", "vereinigte staaten",
+                             "états-unis", "etats-unis", "estados unidos",
+                             "stati uniti", "verenigde staten")),
+    "United Kingdom": ("GB", ("united kingdom", "great britain", "vereinigtes königreich",
+                              "royaume-uni", "reino unido", "regno unito")),
+    "Germany": ("DE", ("germany", "deutschland", "allemagne", "alemania", "germania")),
+    "France": ("FR", ("france", "frankreich", "francia")),
+    "Netherlands": ("NL", ("netherlands", "niederlande", "pays-bas", "países bajos",
+                           "paesi bassi", "nederland")),
+    "Belgium": ("BE", ("belgium", "belgien", "belgique", "bélgica", "belgio", "belgië")),
+    "Austria": ("AT", ("austria", "österreich", "autriche")),
+    "Switzerland": ("CH", ("switzerland", "schweiz", "suisse", "suiza", "svizzera")),
+    "Sweden": ("SE", ("sweden", "schweden", "suède", "suecia", "svezia", "sverige")),
+    "Denmark": ("DK", ("denmark", "dänemark", "danemark", "dinamarca", "danimarca",
+                       "danmark")),
+    "Norway": ("NO", ("norway", "norwegen", "norvège", "noruega", "norvegia", "norge")),
+    "Finland": ("FI", ("finland", "finnland", "finlande", "finlandia", "suomi")),
+    "Iceland": ("IS", ("iceland", "island", "islande", "islandia", "ísland")),
+    "Ireland": ("IE", ("ireland", "irland", "irlande", "irlanda")),
+    "Italy": ("IT", ("italy", "italien", "italie", "italia")),
+    "Spain": ("ES", ("spain", "spanien", "espagne", "españa", "spagna")),
+    "Portugal": ("PT", ("portugal", "portogallo",)),
+    "Poland": ("PL", ("poland", "polen", "pologne", "polonia", "polska")),
+    "Czechia": ("CZ", ("czechia", "czech republic", "tschechien", "tchéquie",
+                       "chequia", "cechia")),
+    "Slovakia": ("SK", ("slovakia", "slowakei", "slovaquie")),
+    "Hungary": ("HU", ("hungary", "ungarn", "hongrie", "hungría", "ungheria",
+                       "magyarország")),
+    "Romania": ("RO", ("romania", "rumänien", "roumanie", "românia")),
+    "Croatia": ("HR", ("croatia", "kroatien", "croatie", "hrvatska")),
+    "Serbia": ("RS", ("serbia", "serbien", "serbie", "srbija")),
+    "Greece": ("GR", ("greece", "griechenland", "grèce", "grecia")),
+    "Cyprus": ("CY", ("cyprus", "zypern", "chypre", "chipre")),
+    "Malta": ("MT", ("malta", "malte",)),
+    "Estonia": ("EE", ("estonia", "estland", "estonie")),
+    "Latvia": ("LV", ("latvia", "lettland", "lettonie", "letonia")),
+    "Lithuania": ("LT", ("lithuania", "litauen", "lituanie", "lituania")),
+    "Türkiye": ("TR", ("türkiye", "turkey", "türkei", "turquie", "turquía")),
+    "Israel": ("IL", ("israel", "israël", "israele")),
+    "Canada": ("CA", ("canada", "kanada",)),
+    "Australia": ("AU", ("australia", "australien", "australie")),
+    "New Zealand": ("NZ", ("new zealand", "neuseeland", "nouvelle-zélande")),
+    "Japan": ("JP", ("japan", "japon", "japón", "giappone")),
+}
+_SHIPTO = {"name": "", "iso2": "", "aliases": ()}
+
+
+def _set_shipto_country(name):
+    meta = _COUNTRY_META.get((name or "").strip())
+    if meta:
+        _SHIPTO.update(name=name.strip(), iso2=meta[0], aliases=meta[1])
+    else:
+        _SHIPTO.update(name="", iso2="", aliases=())
+
+
+def _ebay_ships_to(page_text):
+    """Read an eBay LISTING page and decide whether it ships to the user's
+    country. True = yes, False = explicitly no, None = can't tell (callers
+    must KEEP None — never hide a listing on doubt)."""
+    if not _SHIPTO["name"]:
+        return None
+    low = re.sub(r"\s+", " ", (page_text or "").replace("&nbsp;", " ")).lower()
+    # English markers with WORD BOUNDARIES ("relationships to" must not
+    # anchor the parser); localized markers are multi-word and safe as
+    # substrings. The EARLIEST marker on the page wins — that's the real
+    # shipping module.
+    m = re.search(r"\b(?:ships|shipping)\s+to\b", low)
+    pos = m.start() if m else -1
+    for mk in ("versand nach", "lieferung nach", "livraison vers",
+               "spedizione verso", "envío hacia", "envio hacia",
+               "verzenden naar"):
+        i = low.find(mk)
+        if i != -1 and (pos == -1 or i < pos):
+            pos = i
+    if pos == -1:
+        return None
+    win = low[pos:pos + 3500]
+    aliases = _SHIPTO["aliases"]
+    for ex in ("does not ship to", "doesn't ship to", "no shipping to",
+               "excludes:", "excluded:", "ausgeschlossen",
+               "liefert nicht nach", "versendet nicht nach",
+               "kein versand nach", "n'expédie pas", "no envía a",
+               "non spedisce"):
+        i = win.find(ex)
+        if i != -1 and any(a in win[i:i + 600] for a in aliases):
+            return False
+    for wt in ("worldwide", "weltweit", "monde entier", "tutto il mondo",
+               "todo el mundo", "wereldwijd", "hela världen"):
+        if wt in win:
+            return True
+    if any(a in win for a in aliases):
+        return True
+    if "see details" in win or "siehe details" in win:
+        return None
+    # A NEGATIVE verdict is only safe when the marker is an explicit list
+    # ("Ships to: <countries>"). Prose like "fast shipping to you" anchors
+    # here too, and concluding False from it would wrongly hide listings.
+    if ":" not in win[:30]:
+        return None
+    listed = win.split(":", 1)[1].strip()
+    return False if len(listed) >= 3 else None
+
+
 # ------------------------------------------------- LPU leaderboard / owners
 # The public LPU leaderboard is a precomputed stats file (per-user OWNED counts,
 # display names, privacy flags) — NOT the actual owned lock ids. To find who
@@ -5697,6 +5901,7 @@ class LockHunter(tk.Tk):
         ensure_dirs()
         init_db()          # create tables + run migrations once
         self.cfg = load_cfg()
+        _set_shipto_country(self.cfg.get("user_country") or "")
         self.q = queue.Queue()
         self._thumb_ref = None
         # One-time cleanup: remove the old 83-lock "sheet" seed that earlier
@@ -7724,6 +7929,26 @@ class LockHunter(tk.Tk):
             opts, text="Also search Facebook Marketplace (public listings, slower)",
             variable=self.fb_var, command=self._toggle_fb_search)
         self.fb_check.pack(side="left", padx=(0, 18))
+        # Ship-to country. When set it is ALWAYS applied to the eBay API path
+        # (deliveryCountry filter — free precision). The checkbox additionally
+        # opens each scraped eBay listing to read its "Ships to" section —
+        # accurate but slower, so it's opt-in. Single-lock searches only.
+        tk.Label(opts, text="My country:", bg=self.C_PANEL, fg=self.C_MUTE
+                 ).pack(side="left", padx=(6, 4))
+        self.country_var = tk.StringVar(
+            value=self.cfg.get("user_country") or "(not set)")
+        self.country_box = ttk.Combobox(
+            opts, textvariable=self.country_var, width=15, state="readonly",
+            values=("(not set)",) + tuple(_COUNTRY_META))
+        self.country_box.pack(side="left", padx=(0, 14))
+        self.country_box.bind("<<ComboboxSelected>>", self._on_country_changed)
+        self.shipto_var = tk.BooleanVar(value=bool(self.cfg.get("shipto_only")))
+        self.shipto_check = ttk.Checkbutton(
+            opts,
+            text="Only eBay listings that ship to me (opens each listing — slower)",
+            variable=self.shipto_var, command=self._toggle_shipto)
+        self.shipto_check.pack(side="left")
+        self._apply_shipto_state()
         # LPU Lock Bazaar is always included; kept as hidden state (no checkbox).
         self.bazaar_var = tk.BooleanVar(value=True)
         # Extended search is now ALWAYS ON (no toggle) — deeper pages, more
@@ -8182,6 +8407,32 @@ class LockHunter(tk.Tk):
         times.append(now)
         self.cfg["fb_search_times"] = times
         save_cfg(self.cfg)
+
+    def _on_country_changed(self, _event=None):
+        name = self.country_var.get()
+        if name == "(not set)":
+            name = ""
+        _set_shipto_country(name)
+        self.cfg["user_country"] = name
+        save_cfg(self.cfg)
+        self._apply_shipto_state()
+        self.status.set(
+            f"Country set to {name}: eBay API results now filter to listings "
+            "that deliver there." if name else "Country cleared.")
+
+    def _toggle_shipto(self):
+        self.cfg["shipto_only"] = bool(self.shipto_var.get())
+        save_cfg(self.cfg)
+
+    def _apply_shipto_state(self):
+        """The per-listing check needs a country to check against."""
+        has = bool(_SHIPTO["name"])
+        try:
+            self.shipto_check.config(state=("normal" if has else "disabled"))
+        except Exception:
+            pass
+        if not has:
+            self.shipto_var.set(False)
 
     def _toggle_fb_search(self):
         """Ticking 'Also search Facebook Marketplace' turns on the optional
@@ -9179,6 +9430,53 @@ class LockHunter(tk.Tk):
                 self.ai_var.get(), use_fb)
         threading.Thread(target=self._worker, args=args, daemon=True).start()
 
+    def _filter_ebay_shipto(self, results, cb):
+        """Open each eBay listing page (capped) and keep only ones that ship
+        to the user's country. Non-eBay rows pass through untouched; pages
+        that can't be fetched or parsed are KEPT, with their titles labelled
+        "ship-to unconfirmed" — never hidden on doubt."""
+        country = _SHIPTO["name"]
+        idxs = [i for i, r in enumerate(results)
+                if str(r.get("site", "")).startswith("eBay") and r.get("url")]
+        if not idxs:
+            return results
+        check = idxs[:40]          # politeness cap
+        cb(f"Ship-to check: opening {len(check)} eBay listing(s) "
+           f"(do they ship to {country}?)…")
+        sess = _ebay_session()
+        drop = set()
+        n_unk = 0
+        for k, i in enumerate(check, 1):
+            url = results[i]["url"]
+            dom = urllib.parse.urlparse(url).netloc or "www.ebay.com"
+            verdict = None
+            try:
+                st, text = _ebay_get(sess, url, dom)
+                if st == 200 and text:
+                    verdict = _ebay_ships_to(text)
+            except Exception:
+                verdict = None
+            if verdict is False:
+                drop.add(i)
+            elif verdict is None:
+                n_unk += 1
+                t = str(results[i].get("title") or "")
+                if t and "ship-to unconfirmed" not in t:
+                    results[i]["title"] = t + "  — ship-to unconfirmed"
+            if k % 8 == 0:
+                cb(f"  ship-to check {k}/{len(check)}…")
+            time.sleep(0.35)
+        kept = [r for i, r in enumerate(results) if i not in drop]
+        skipped = len(idxs) - len(check)
+        self.q.put(("status", log(
+            f"Ship-to {country}: removed {len(drop)} of {len(check)} checked "
+            f"eBay listing(s)"
+            + (f"; {n_unk} undetermined — kept and labelled"
+               if n_unk else "")
+            + (f"; {skipped} beyond the {len(check)}-listing cap kept"
+               if skipped else "") + ".")))
+        return kept
+
     def _worker(self, key, lock_name, cond, excl, bazaar, deep=False, belt="",
                 sales="Both", use_ai=True, use_fb=False):
         started = datetime.datetime.now().isoformat(timespec="seconds")
@@ -9328,6 +9626,15 @@ class LockHunter(tk.Tk):
                         f"Facebook Marketplace error: {ex}")))
             # Verify each listing URL is live (drops 404/403/ended-eBay etc).
             before = len(results)
+            # Optional ship-to filter (single-lock searches, eBay rows only):
+            # opens each eBay listing page and keeps ones that ship to the
+            # user's country. Undeterminable pages are KEPT.
+            if (getattr(self, "shipto_var", None) is not None
+                    and self.shipto_var.get() and _SHIPTO["name"]):
+                try:
+                    results = self._filter_ebay_shipto(results, cb)
+                except Exception as ex:
+                    self.q.put(("status", log(f"Ship-to check failed: {ex}")))
             results = verify_listings(
                 results, lambda s: self.q.put(("status", s)))
             if before != len(results):
@@ -9801,6 +10108,8 @@ class LockHunter(tk.Tk):
         for i, rec in enumerate(rows):
             price_disp = " ".join(p for p in (str(rec[2] or "").strip(),
                                               str(rec[3] or "").strip()) if p)
+            if not price_disp:
+                price_disp = "unknown"   # listed anyway — price not readable
             if usd_on and rates:
                 u = _usd_estimate(rec[2], rec[3], rates)
                 _amt, cur = _parse_price(rec[2], rec[3])

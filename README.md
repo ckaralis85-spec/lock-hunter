@@ -68,3 +68,27 @@ you explicitly compare against) to load Owned/Wishlist locks.
 
 [MIT](LICENSE) © the author. Please update the copyright line in `LICENSE` with
 your name/handle before publishing.
+
+## Antivirus & browser download warnings
+
+Chrome, SmartScreen, or an antivirus may flag the downloaded `LockHunter.exe`.
+This is a **false positive** that affects most small open-source Windows apps
+packed with PyInstaller: the exe is new, rarely downloaded, and self-extracting,
+which security heuristics treat with suspicion until the file builds reputation.
+
+What you can do:
+
+- **Verify, then keep.** Each release lists the exe's SHA-256 on the GitHub
+  Releases page - compare it after downloading, then choose *Keep / Download
+  anyway* in your browser.
+- **Build it yourself.** Run `Install LockHunter.bat` from the source zip - the
+  exe is compiled on your own PC from the code in this repo, so nothing is
+  downloaded that a browser could flag.
+- Releases are **code-signed**, and the exe carries proper Windows version
+  metadata; reputation with Google/Microsoft builds automatically as the same
+  signed app is downloaded over time.
+
+If your scanner still flags it, it can be reported as a false positive to
+[Google Safe Browsing](https://safebrowsing.google.com/safebrowsing/report_error/)
+and [Microsoft](https://www.microsoft.com/en-us/wdsi/filesubmission).
+

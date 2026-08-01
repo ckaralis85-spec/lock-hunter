@@ -113,7 +113,15 @@ echo Building LockHunter.exe (this can take a minute or two)...
 >>"%LOG%" echo --- pyinstaller ---
 set "CURL_OPT="
 if defined CURLCFFI_OK set CURL_OPT=--collect-all curl_cffi
+REM Windows version metadata (CompanyName/ProductName/FileVersion) baked into
+REM the exe - bare PyInstaller exes WITHOUT a version resource are a classic
+REM antivirus / Safe-Browsing false-positive trigger.
+python lock_hunter.py --write-version-file "version_info.txt" >nul 2>&1
+set "VER_OPT="
+if exist "version_info.txt" set VER_OPT=--version-file "version_info.txt"
 pyinstaller --onefile --windowed --name LockHunter ^
+  --clean --noupx ^
+  %VER_OPT% ^
   %ICON_OPT% ^
   %DATA_OPT% ^
   --hidden-import openpyxl ^
@@ -123,6 +131,7 @@ pyinstaller --onefile --windowed --name LockHunter ^
 set "PYI_RC=%ERRORLEVEL%"
 
 if exist "_built_icon.ico" del /f /q "_built_icon.ico"
+if exist "version_info.txt" del /f /q "version_info.txt"
 
 if not "%PYI_RC%"=="0" goto :build_failed
 if not exist "dist\LockHunter.exe" goto :build_failed

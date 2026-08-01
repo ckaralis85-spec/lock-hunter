@@ -76,7 +76,12 @@ if exist "assets\lpu_icon.ico" (
 
 echo Installing Lock Hunter (this can take a minute or two)...
 >>"%LOG%" echo --- pyinstaller ---
+python lock_hunter.py --write-version-file "version_info.txt" >nul 2>&1
+set "VER_OPT="
+if exist "version_info.txt" set VER_OPT=--version-file "version_info.txt"
 pyinstaller --onefile --windowed --name LockHunter ^
+  --clean --noupx ^
+  %VER_OPT% ^
   %ICON_OPT% ^
   %DATA_OPT% ^
   --hidden-import openpyxl ^
@@ -85,6 +90,7 @@ pyinstaller --onefile --windowed --name LockHunter ^
 
 REM clean up the temp icon we may have extracted
 if exist "_built_icon.ico" del /f /q "_built_icon.ico"
+if exist "version_info.txt" del /f /q "version_info.txt"
 
 REM NOTE: user data (database, log, saved API key/profile) lives in
 REM   %USERPROFILE%\.lockhunter\   and is NOT touched by builds or installs,

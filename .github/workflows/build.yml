@@ -31,10 +31,15 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Write the Windows version resource
+        run: python lock_hunter.py --write-version-file version_info.txt
+
       - name: Build the standalone exe
         run: >
           pyinstaller --noconfirm --onefile --windowed
+          --clean --noupx
           --name LockHunter
+          --version-file version_info.txt
           --icon assets/lpu_icon.ico
           --add-data "assets;assets"
           lock_hunter.py
