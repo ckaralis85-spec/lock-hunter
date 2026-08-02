@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "5.0.3"
+VERSION = "5.1.0"
 
 
 
@@ -269,9 +269,9 @@ def _refresh_stable_icons():
     same old path keeps showing the stale cached image no matter how many
     times the bytes change, while a path that changes with the icon's content
     has no cache entry and always renders fresh. The legacy lpu_icon.ico path
-    is refreshed too, for old shortcuts that still aim at it. When anything
-    changed and this is the frozen Windows exe, existing "Lock Hunter.lnk"
-    shortcuts are silently re-pointed at this exe + the new hashed icon.
+    is refreshed too, for old shortcuts that still aim at it. (Re-pointing
+    existing desktop shortcuts at runtime was REMOVED — the app no longer
+    spawns PowerShell/ie4uinit; shortcut creation is the installer's job.)
     Never raises. Returns True if any file was rewritten."""
     changed = False
     try:
@@ -966,9 +966,9 @@ def search_ebay_direct(lock_name, status_cb, deep=False, origin=""):
                 img = row[3] if len(row) > 3 else ""
                 if tokens and not _match_tokens(title, tokens):
                     continue
-                if (_LOCK_CONTEXT_FILTER and not _search_has_lock_word(lock_name)
-                        and not _has_lock_context(title)):
-                    continue
+                # (Lock-context filtering moved to display time — see
+                # _refresh_table. Everything matching the tokens is stored so
+                # the "Lock results only" box can be toggled after a scan.)
                 if link in seen:
                     continue
                 seen.add(link)
@@ -1069,7 +1069,10 @@ def _parse_ebay_api_items(payload, marketplace):
     """Turn a Browse API item_summary/search JSON response into listing tuples
     (title, price_str, url, condition, location)."""
     out = []
-    for it in (payload or {}).get("itemSummaries", []) or []:
+    if not isinstance(payload, dict):
+        return out          # defensive: eBay 200s are JSON objects, but a
+        #                     malformed body must degrade, not raise
+    for it in payload.get("itemSummaries", []) or []:
         title = (it.get("title") or "").strip()
         url = it.get("itemWebUrl") or it.get("itemHref") or ""
         price = ""
@@ -1150,9 +1153,8 @@ def search_ebay_api(lock_name, status_cb, deep=False, origin=""):
             for title, price, url, cond, loc, img in items:
                 if tokens and not _match_tokens(title, tokens):
                     continue
-                if (_LOCK_CONTEXT_FILTER and not _search_has_lock_word(lock_name)
-                        and not _has_lock_context(title)):
-                    continue
+                # (Lock-context filtering moved to display time — see
+                # _refresh_table.)
                 if url in seen:
                     continue
                 seen.add(url)
@@ -1585,11 +1587,17 @@ def _canon_aliases(folded):
 
 def _lock_tokens(name):
     """Canonical match tokens for a lock name: accent-folded, brand-aliases
-    canonicalized, sizes glued (83/45 -> 8345), split on non-alphanumerics,
-    single chars dropped. The one place token lists are made, so every probe
-    matches identically."""
+    canonicalized, sizes glued (83/45 -> 8345), split on non-alphanumerics.
+    Single-character MODEL designators are kept — digits always ('Kaba 8'),
+    letters only when UPPERCASE in the original name ('GOAL Z' keeps z) —
+    while single lowercase words ('a padlock') are dropped as noise. Dropping
+    them all used to make 'Kaba 8' match every Kaba and 'GOAL Z' every GOAL.
+    The one place token lists are made, so every probe matches identically."""
     prepared = _norm_sizes(_canon_aliases(_fold(name)))
-    return [t for t in re.split(r"[^a-z0-9]+", prepared) if len(t) > 1]
+    keep_singles = {t.lower() for t in re.split(r"[^0-9A-Za-z]+", str(name or ""))
+                    if len(t) == 1 and (t.isdigit() or t.isupper())}
+    return [t for t in re.split(r"[^a-z0-9]+", prepared)
+            if len(t) > 1 or t in keep_singles]
 
 
 def _match_tokens(title, tokens):
@@ -1597,12 +1605,25 @@ def _match_tokens(title, tokens):
     alias-aware: the title is put through the same fold -> canon-alias ->
     size-glue pipeline as the tokens, so '8345' matches '83/45' and a title
     saying 'MTL' satisfies a 'Mul-T-Lock' token. Exact-model discipline holds —
-    each token must still be accounted for."""
+    each token must still be accounted for. SHORT tokens (1-2 chars — model
+    designators like '8', 'Z', 'N1') must stand alone on word boundaries,
+    otherwise '8' would match inside '1980' and 'z' inside 'zylinder'."""
     if not title or not tokens:
         return False
-    tl = _norm_sizes(_canon_aliases(_fold(title)))
+    tl_raw = _canon_aliases(_fold(title))
+    tl = _norm_sizes(tl_raw)
     for tok in tokens:
         tk = _norm_sizes(_canon_aliases(tok))
+        if len(tok) <= 2:
+            # check BOTH the size-glued and the raw title: gluing can fuse a
+            # short model number into a size ("Kaba 8 x 22mm" -> "kaba 822mm"),
+            # which would wrongly hide a genuine match
+            pat = r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z0-9])"
+            if re.search(pat, tl) or re.search(pat, tl_raw):
+                continue
+            if tk != tok and tk in tl:
+                continue
+            return False
         if tk in tl or tok in tl:
             continue
         return False
@@ -1766,6 +1787,337 @@ _SAFE_ADJ_JUNK = (
 # listing gets dropped.
 _LOCK_CONTEXT_FILTER = True
 
+# ---------------------------------------------------------------------------
+# "Blank key" junk: listings selling a KEY BLANK / uncut key / key-cutting
+# service FOR a lock. They match the lock's name and contain a key word, so
+# they slip past the lock-context filter — but the PRODUCT is a key, not the
+# lock. We match only UNAMBIGUOUS multilingual key-blank vocabulary — phrasing
+# a listing for the actual lock essentially never uses — so hiding these does
+# not drop real locks (a lock sold "with a key" / "2 keys included" contains
+# none of these phrases). Folded (ASCII) terms are tested against _fold(title);
+# the raw list covers scripts _fold() would strip (Cyrillic / CJK).
+_KEYBLANK_TERMS = (
+    # English
+    "blank key", "key blank", "keyblank", "blank keys", "key blanks",
+    "uncut key", "uncut keys", "uncut blank", "cut to code", "cut to card",
+    "key cutting", "keys cut", "cut your own key", "key cut to code",
+    # German — Schlüsselrohling / Rohling
+    "schlusselrohling", "schluesselrohling", "schlusselrohlinge", "rohling",
+    # French — clé/clef vierge, ébauche de clé
+    "cle vierge", "clef vierge", "cles vierges", "clefs vierges",
+    "ebauche de cle", "ebauche de clef", "ebauche",
+    # Spanish — llave virgen / en bruto / sin cortar
+    "llave virgen", "llaves virgenes", "llave en bruto", "llave sin cortar",
+    "llave bruta",
+    # Portuguese — chave virgem / bruta
+    "chave virgem", "chave bruta",
+    # Italian — chiave grezza / vergine
+    "chiave grezza", "chiavi grezze", "chiave vergine",
+    # Dutch — blanco/blank sleutel, ongesneden
+    "blanco sleutel", "sleutel blanco", "sleutel blank", "sleutelblank",
+    "ongesneden sleutel",
+    # Nordic — nyckelämne / nøkkelemne / nøgleemne
+    "nyckelamne", "nyckelamnen", "nokkelemne", "nogleemne",
+    # Finnish — avainaihio
+    "avainaihio",
+    # Polish — klucz surowy / półsurówka
+    "klucz surowy", "polsurowka", "surowka klucza",
+    # Czech / Slovak — polotovar klíče
+    "polotovar klice", "klic polotovar", "polotovar kluca",
+    # Turkish — anahtar taslağı
+    "anahtar taslagi",
+)
+_KEYBLANK_RAW = (
+    # Russian / Ukrainian / Bulgarian — заготовка (ключа), болванка
+    "заготовка ключа", "ключ заготовка", "заготовка", "болванка",
+    "заготівка ключа",
+    # Japanese — ブランクキー / キーブランク / 鍵ブランク
+    "ブランクキー", "キーブランク", "鍵ブランク",
+    # Chinese — 钥匙胚 / 毛坯钥匙 / 钥匙坯 / 鑰匙胚
+    "钥匙胚", "毛坯钥匙", "钥匙坯", "鑰匙胚",
+)
+
+# Inclusion markers: when a key term is preceded/attached by one of these, the
+# key is an ACCESSORY of a lock that's also in the title ("padlock WITH 2 keys",
+# "lock, keys included", "mit Schlüssel", "avec clé", "con llave", "med nøgle"),
+# so the listing IS the lock — keep it. A KEY-PRODUCT title instead reads
+# "blank key FOR <lock>" and carries no such marker.
+_KEY_INCL_PADDED = (" with ", " w/ ", " avec ", " mit ", " con ", " met ",
+                    " med ", " comes with ", " incl ", " inkl ")
+_KEY_INCL_SUB = ("included", "includes", "including", "inclusive", "inklusive",
+                 "inklusiv", "inclus", "incluye", "incluida", "incluido",
+                 "compreso", "compresa", "complete with", "e chiave",
+                 "und schlussel", "en sleutel", "og nogle", "och nyckel")
+_KEY_INCL_RAW = ("付き", "付属", "込み", "с ключом", "с ключами", "в комплекте")
+
+def _is_key_blank(title):
+    """True if the title is selling a KEY BLANK / uncut key / key-cutting
+    service (it matches the lock's name but is NOT the lock). Uses unambiguous
+    multilingual key-blank vocabulary, and KEEPS a listing when the key is
+    presented as an included accessory of a lock ('padlock with 2 uncut keys',
+    'keys included') — so real locks that ship with blank keys aren't dropped."""
+    raw = str(title or "").lower()
+    has_term = any(t in raw for t in _KEYBLANK_RAW)
+    folded = _fold(title)
+    if not has_term and folded:
+        has_term = any(t in folded for t in _KEYBLANK_TERMS)
+    if not has_term:
+        return False
+    # The key is an included accessory of a lock -> real lock, keep it.
+    norm = " " + re.sub(r"[^a-z0-9/]+", " ", folded).strip() + " "
+    if any(m in norm for m in _KEY_INCL_PADDED):
+        return False
+    if any(m in norm for m in _KEY_INCL_SUB):
+        return False
+    if any(m in raw for m in _KEY_INCL_RAW):
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Foreign-title glossary: annotate common non-English lock/condition words with
+# a short English gloss FOR DISPLAY ONLY. It never changes the stored title or
+# any filter — the filters read the raw title before this runs. English titles
+# get nothing (the glossary holds only non-English terms). Single-word keys are
+# matched whole-word (so "ny"=new can't fire inside "funny"); multi-word keys
+# are matched as substrings of the folded title; the raw map covers Cyrillic
+# that _fold() would strip.
+_TITLE_GLOSSARY = {
+    # lock/key nouns & key phrases (put phrases first so they win)
+    "mit schlussel": "with key", "ohne schlussel": "no key",
+    "avec cle": "with key", "sans cle": "no key",
+    "con llave": "with key", "sin llave": "no key",
+    "con chiave": "with key", "senza chiave": "no key",
+    "met sleutel": "with key", "zonder sleutel": "no key",
+    "med nyckel": "with key", "med nokkel": "with key", "med nogle": "with key",
+    "z kluczem": "with key", "bez klucza": "no key",
+    "vorhangeschloss": "padlock", "vorhangschloss": "padlock",
+    "hangeschloss": "padlock", "hangschloss": "padlock",
+    "schloss": "lock", "schlussel": "key", "schlussels": "keys",
+    "zylinder": "cylinder", "schliesszylinder": "cylinder",
+    # German compound cylinder vocabulary (very common on eBay.de listings)
+    "profilzylinder": "profile cylinder", "doppelzylinder": "double cylinder",
+    "kurzzylinder": "short cylinder", "halbzylinder": "half cylinder",
+    "turzylinder": "door cylinder", "knaufzylinder": "knob cylinder",
+    "turschloss": "door lock", "sicherheitsschloss": "security lock",
+    "schliessanlage": "locking system", "mehrschlussel": "extra keys",
+    "zusatzschlussel": "extra keys", "stiftig": "pins", "messing": "brass",
+    "gleichschliessend": "keyed alike", "verschieden": "various",
+    "konvolut": "lot", "sammlung": "collection", "ovp": "orig. packaging",
+    "cadenas": "padlock", "serrure": "lock", "cle": "key", "clef": "key",
+    "cles": "keys", "clefs": "keys", "cylindre": "cylinder",
+    "verrou": "bolt lock", "laiton": "brass",
+    "candado": "padlock", "cerradura": "lock", "llave": "key", "llaves": "keys",
+    "bombin": "cylinder", "cilindro": "cylinder", "cerrojo": "bolt lock",
+    "laton": "brass", "coleccion": "collection",
+    "lucchetto": "padlock", "serratura": "lock", "chiave": "key",
+    "chiavi": "keys", "ottone": "brass", "lotto": "lot",
+    "collezione": "collection",
+    # Portuguese (Mercado Libre Brazil)
+    "cadeado": "padlock", "fechadura": "lock", "chave": "key",
+    "chaves": "keys", "latao": "brass",
+    "hangslot": "padlock", "slot": "lock", "sleutel": "key",
+    "sleutels": "keys", "cilinder": "cylinder", "cilinderslot": "cylinder lock",
+    "deurslot": "door lock", "verzameling": "collection",
+    "hanglas": "padlock", "hengelas": "padlock", "hangelas": "padlock",
+    "riippulukko": "padlock", "lukko": "lock", "nyckel": "key",
+    "nycklar": "keys", "nokkel": "key", "nogle": "key",
+    "avain": "key", "avaimet": "keys", "klodka": "padlock", "zamek": "lock",
+    "klucz": "key", "klucze": "keys", "wkladka": "cylinder",
+    "mosiadz": "brass", "kolekcja": "collection",
+    # condition
+    "gebraucht": "used", "neuwertig": "like new", "neu": "new",
+    "gebrauchsspuren": "wear", "selten": "rare", "defekt": "faulty",
+    "occasion": "used", "neuf": "new", "ancien": "old", "ancienne": "old",
+    "casse": "broken",
+    "usado": "used", "nuevo": "new", "antiguo": "old", "antigua": "old",
+    "raro": "rare", "novo": "new", "antigo": "old",
+    "usato": "used", "nuovo": "new", "funzionante": "working",
+    "antico": "old", "antica": "old",
+    "gebruikt": "used", "nieuw": "new", "zeldzaam": "rare", "oud": "old",
+    "begagnad": "used", "brukt": "used", "brugt": "used", "sallsynt": "rare",
+    "gammal": "old", "gammel": "old",
+    "kaytetty": "used", "uusi": "new", "vanha": "old",
+    "uzywany": "used", "nowy": "new", "rzadki": "rare", "stary": "old",
+    "zabytkowy": "antique",
+}
+_TITLE_GLOSSARY_RAW = {
+    # Cyrillic (substring match, so stems cover the case endings)
+    "навесной замок": "padlock", "входная дверь": "front door",
+    "б/у": "used", "бу": "used",
+    "новый": "new", "редкий": "rare", "рабочий": "working",
+    "старинный": "antique", "замок": "lock", "ключи": "keys", "ключ": "key",
+    "цилиндр": "cylinder", "латунь": "brass",
+    "врезной": "mortise", "сувальдн": "lever lock", "защёлк": "latch",
+    "защелк": "latch", "дверн": "door", "дверь": "door",
+    "гаражн": "garage", "универсал": "universal",
+    # Japanese (Yahoo Auctions / Mercari / Buyee)
+    "南京錠": "padlock", "錠前": "lock", "鍵": "key", "中古": "used",
+    "新品": "new", "未使用": "unused", "真鍮": "brass",
+    # Chinese (Taobao) — longer phrases first so "挂锁" wins before "锁"
+    "挂锁": "padlock", "钥匙": "key", "全新": "new", "二手": "used",
+    "黄铜": "brass", "锁": "lock",
+}
+
+def _glossed_title(title):
+    """Title with a compact English gloss of foreign lock/condition terms
+    appended, for DISPLAY ONLY (does not change the stored title or filters).
+    e.g. 'Vorhängeschloss gebraucht mit Schlüssel' ->
+    '… · [with key, padlock, used]'. Returns the title unchanged if nothing
+    foreign is recognized."""
+    t = str(title or "")
+    if not t.strip():
+        return t
+    raw = t.lower()
+    folded = _fold(t)
+    words = set(re.split(r"[^a-z0-9]+", folded))
+    glosses, seen = [], set()
+
+    def add(g):
+        if g not in seen:
+            seen.add(g)
+            glosses.append(g)
+
+    for key, g in _TITLE_GLOSSARY_RAW.items():
+        if key in raw:
+            add(g)
+    for key, g in _TITLE_GLOSSARY.items():
+        if len(glosses) >= 5:
+            break
+        if " " in key:
+            if key in folded:
+                add(g)
+        elif key in words:
+            add(g)
+    # "key" is redundant once "with key" / "no key" is shown.
+    if ("with key" in seen or "no key" in seen) and "key" in glosses:
+        glosses.remove("key")
+    # likewise "lock" is redundant next to "padlock", and "key" next to "keys"
+    # (e.g. Chinese "挂锁" also contains "锁"; Cyrillic "ключи" contains "ключ")
+    if "padlock" in seen and "lock" in glosses:
+        glosses.remove("lock")
+    if "keys" in seen and "key" in glosses:
+        glosses.remove("key")
+    if "front door" in seen and "door" in glosses:
+        glosses.remove("door")
+    if not glosses:
+        return t
+    return t + "   ·  [" + ", ".join(glosses[:5]) + "]"
+
+
+# ---------------------------------------------------------------- free title translation
+# Full-title translation via the free Google Translate web endpoint (the same
+# one the translate.google.com page uses). No API key, no cost. Best-effort in
+# the same spirit as the marketplace probes: when the endpoint is unreachable
+# or blocked it returns nothing and the display quietly falls back to the
+# built-in glossary. Display-only — stored titles, filters and exports always
+# use the original text.
+_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
+_TRANSLATE_CACHE = {}      # original title -> English translation (per session)
+_TRANSLATE_FAILED = set()  # titles a fetch failed for — not retried until the
+                           # checkbox is toggled off/on (prevents a retry loop
+                           # hammering the endpoint on every table refresh)
+
+def _needs_translation(title):
+    """True for titles worth machine-translating: any non-ASCII letters
+    (Cyrillic, CJK, accented Latin), or a title the glossary recognizes as
+    foreign. Plain-English titles return False."""
+    t = str(title or "")
+    if not t.strip():
+        return False
+    if any(ord(c) > 127 and c.isalpha() for c in t):
+        return True
+    return _glossed_title(t) != t
+
+def _translate_batch_request(text):
+    """One request to the gtx endpoint; returns the translated text (segments
+    joined) or None on any failure. Never raises."""
+    try:
+        r = requests.get(
+            _TRANSLATE_URL,
+            params={"client": "gtx", "sl": "auto", "tl": "en",
+                    "dt": "t", "q": text},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        segs = data[0] if isinstance(data, list) and data else []
+        out = "".join(s[0] for s in segs
+                      if isinstance(s, list) and s and isinstance(s[0], str))
+        return out or None
+    except Exception:
+        return None
+
+def translate_titles_free(titles):
+    """Translate a list of titles to English. Batches ~15 titles per request
+    joined by newlines (titles are whitespace-collapsed first, so an embedded
+    newline inside a stored title can never shift the alignment); if a batch
+    comes back misaligned anyway (translator segment drift), falls back to one
+    request per title for that batch. A request FAILURE is treated as the
+    endpoint being down — no per-title retry storm, and two failed batches in
+    a row abort the whole run. Returns {original: translation} for everything
+    that succeeded — callers treat a missing key as 'show the original'."""
+    out = {}
+    todo = [t for t in titles if t and t.strip()]
+    down = 0
+    for i in range(0, len(todo), 15):
+        batch = todo[i:i + 15]
+        cleaned = [re.sub(r"\s+", " ", t).strip() for t in batch]
+        joined = _translate_batch_request("\n".join(cleaned))
+        if joined is None:              # endpoint down / blocked — no retries
+            down += 1
+            if down >= 2:
+                break
+            continue
+        down = 0
+        lines = joined.split("\n")
+        if len(lines) == len(batch):
+            for orig, tr in zip(batch, lines):
+                tr = tr.strip()
+                if tr:
+                    out[orig] = tr
+            continue
+        for orig, cl in zip(batch, cleaned):   # drift -> per-title fallback
+            tr = _translate_batch_request(cl)
+            if tr and tr.strip():
+                out[orig] = tr.strip()
+    return out
+
+
+def _median(vals):
+    """Median of a non-empty list of numbers."""
+    s = sorted(vals)
+    n = len(s)
+    if n == 0:
+        return None
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def _parse_price_bound(s):
+    """Parse a user-typed price bound to a float, or None if blank/invalid.
+    Tolerant of a leading currency symbol, thousands commas, and spaces
+    ('$50', '1,234', '20.5')."""
+    s = str(s or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"[^\d.]", "", s.replace(",", ""))
+    if not s or s.count(".") > 1:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+# Deal score: a listing is a "good price" when its USD-estimated price is at or
+# below _DEAL_FACTOR × the median USD price seen for that lock across
+# listing_history — but only once there are at least _DEAL_MIN_POINTS prices to
+# form a meaningful median (else there's no basis and nothing is flagged).
+_DEAL_FACTOR = 0.80
+_DEAL_MIN_POINTS = 4
+
+
 def _search_has_lock_word(lock_name):
     """If the user's own search term already includes a lock word (e.g. they
     typed 'Abloy padlock'), the token match already constrains to locks, so we
@@ -1812,13 +2164,10 @@ def _generic_probe(site_name, url, parse_fn, lock_name, status_cb, note):
                 continue
             if tokens and not _match_tokens(title, tokens):
                 continue
-            # Lock-context filter: drop same-name non-lock items (e.g. a "Sol"
-            # lock model vs. "Sol" sunglasses) when enabled. Skipped if the
-            # search term itself already contains a lock word (then the tokens
-            # do the work and we don't want to double-filter).
-            if (_LOCK_CONTEXT_FILTER and not _search_has_lock_word(lock_name)
-                    and not _has_lock_context(title)):
-                continue
+            # Lock-context filtering (drop same-name non-lock items, e.g. a
+            # "Sol" lock model vs. "Sol" sunglasses) now happens at DISPLAY time
+            # in _refresh_table, so the "Lock results only" box is a reversible
+            # post-scan toggle. Everything matching the tokens is stored here.
             seen.add(link)
             matched += 1
             # Thumbnail: use the parser's image if it captured one, else find
@@ -3042,6 +3391,57 @@ def search_bazaraki_direct(lock_name, status_cb, deep=False):
                                 r'<a[^>]+href="(/adv/(\d+)_[^"]*)"[^>]*>(.*?)</a>'),
         lock_name, status_cb, "found via direct Bazaraki search")
 
+# ---- Allegro (Poland) — biggest PL marketplace; OLX.pl is separate ---------
+# Akamai-protected and JS-heavy, so this is best-effort: JSON-LD first, then a
+# scan for /oferta/<slug>-<id> anchors. Degrades to [] when bot-walled.
+def search_allegro_direct(lock_name, status_cb, deep=False):
+    q = urllib.parse.quote_plus(lock_name.strip())
+    url = f"https://allegro.pl/listing?string={q}"
+    return _generic_probe(
+        "Allegro (PL)", url,
+        lambda h: _ld_or_anchor(
+            h, "https://allegro.pl",
+            r'<a[^>]+href="((?:https://allegro\.pl)?/oferta/[^"]*?-(\d{6,})[^"]*)"[^>]*>(.*?)</a>'),
+        lock_name, status_cb, "found via direct Allegro search")
+
+# ---- Mercado Libre (Latin America) — defaults to the Mexico site -----------
+# Region-limited to .com.mx by default (each ML country is a separate domain).
+# ML emits rich JSON-LD, so that path is primary; anchor fallback matches
+# absolute articulo/www.mercadolibre.com.mx item links.
+def search_mercadolibre_direct(lock_name, status_cb, deep=False):
+    q = urllib.parse.quote(lock_name.strip())
+    url = f"https://listado.mercadolibre.com.mx/{q}"
+    return _generic_probe(
+        "Mercado Libre (MX)", url,
+        lambda h: _ld_or_anchor(
+            h, "https://www.mercadolibre.com.mx",
+            r'<a[^>]+href="(https://(?:articulo|www)\.mercadolibre\.com\.mx/[^"]*?(ML[A-Z]-?\d{6,})[^"]*)"[^>]*>(.*?)</a>'),
+        lock_name, status_cb, "found via direct Mercado Libre search")
+
+# ---- Vinted (EU) — SPA/API-driven, hostile to plain HTTP; best-effort ------
+# The logged-out catalog page is mostly a JS shell, so this often returns [].
+# JSON-LD first, then a scan for /items/<id> anchors.
+def search_vinted_direct(lock_name, status_cb, deep=False):
+    q = urllib.parse.quote_plus(lock_name.strip())
+    url = f"https://www.vinted.com/catalog?search_text={q}"
+    return _generic_probe(
+        "Vinted", url,
+        lambda h: _ld_or_anchor(
+            h, "https://www.vinted.com",
+            r'<a[^>]+href="((?:https://www\.vinted\.com)?/items/(\d{5,})[^"]*)"[^>]*>(.*?)</a>'),
+        lock_name, status_cb, "found via direct Vinted search")
+
+# ---- Trade Me (New Zealand) — the eBay of NZ -------------------------------
+def search_trademe_direct(lock_name, status_cb, deep=False):
+    q = urllib.parse.quote_plus(lock_name.strip())
+    url = f"https://www.trademe.co.nz/a/marketplace/search?search_string={q}"
+    return _generic_probe(
+        "Trade Me (NZ)", url,
+        lambda h: _ld_or_anchor(
+            h, "https://www.trademe.co.nz",
+            r'<a[^>]+href="((?:https://www\.trademe\.co\.nz)?/a/[^"]*?listing/(\d{4,})[^"]*)"[^>]*>(.*?)</a>'),
+        lock_name, status_cb, "found via direct Trade Me search")
+
 # Origin country -> the native marketplace(s) most likely to carry the lock,
 # run first (ordering only; all probes still run — rare locks travel).
 _ORIGIN_NATIVE = {
@@ -3054,7 +3454,7 @@ _ORIGIN_NATIVE = {
     "Sweden": ["Tradera", "Blocket"],
     "Denmark/Sweden": ["Tradera", "Blocket"],
     "Japan": ["Buyee (JP)", "Yahoo Auctions JP", "Mercari JP"],
-    "Poland": ["OLX (pl)"],
+    "Poland": ["OLX (pl)", "Allegro (PL)"],
     "Portugal": ["OLX (pt)"],
     "Russia/Ukraine": ["OLX (ua)"],
     "Finland": ["Tori.fi (FI)", "Huuto.net (FI)"],
@@ -3315,10 +3715,8 @@ def search_facebook_marketplace(lock_name, status_cb, throttle=2.5):
                         continue
                     if tokens and not _match_tokens(title, tokens):
                         continue
-                    if (_LOCK_CONTEXT_FILTER
-                            and not _search_has_lock_word(lock_name)
-                            and not _has_lock_context(title)):
-                        continue
+                    # (Lock-context filtering moved to display time — see
+                    # _refresh_table.)
                     seen.add(link)
                     matched += 1
                     out.append({
@@ -3388,6 +3786,10 @@ def run_extra_marketplace_probes(lock_name, status_cb, origin="", deep=False):
         "Maltapark (MT)": search_maltapark_direct,
         "Sahibinden (TR)": search_sahibinden_direct,
         "Bazaraki (CY)": search_bazaraki_direct,
+        "Allegro (PL)": search_allegro_direct,
+        "Mercado Libre (MX)": search_mercadolibre_direct,
+        "Vinted": search_vinted_direct,
+        "Trade Me (NZ)": search_trademe_direct,
     }
     # OLX needs the origin to pick its country domain; give it a canonical
     # label so origin-native ordering can reference it regardless of domain.
@@ -3409,14 +3811,15 @@ def run_extra_marketplace_probes(lock_name, status_cb, origin="", deep=False):
         order.append(olx_label)   # always probe OLX (defaults to .pl)
     # Every probe is an independent network fetch, so run them CONCURRENTLY
     # instead of one-after-another: wall-clock drops from the SUM of ~45
-    # sites' fetch times to roughly the slowest wave. 24 workers ≈ two waves
-    # for ~45 sites; each site gets exactly ONE request and they're all
-    # different domains, so higher concurrency costs nothing in politeness.
-    # Results are still merged in the same origin-native-first order, de-duped
-    # by url, and any single site failing degrades to [] without affecting
-    # the others.
+    # sites' fetch times to roughly the slowest single site. Each site is a
+    # DIFFERENT domain and gets exactly ONE logical probe, so we size the pool
+    # to the whole site list — one wave, not two — which nearly halves the
+    # sweep time with identical results (no timeout/retry changes, so nothing
+    # is dropped). Results are still merged origin-native-first, de-duped by
+    # url, and any single site failing degrades to [] without affecting others.
     results_by_name = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
+    _sweep_workers = max(24, len(order))   # one wave for the full site list
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_sweep_workers) as pool:
         futures = {name: pool.submit(_run, name) for name in order}
         for name in order:
             try:
@@ -3751,9 +4154,86 @@ def load_cfg():
         return {}
 
 def save_cfg(cfg):
+    # Atomic (temp file + os.replace): config is now written often (window
+    # moves, sort clicks), and a kill/power-cut mid-write must never truncate
+    # cfg.json — load_cfg would silently return {} and lose every setting.
     ensure_dirs()
-    with open(CFG_PATH, "w", encoding="utf-8") as f:
+    tmp = CFG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f)
+    os.replace(tmp, CFG_PATH)
+
+def _rotate_log(max_bytes=2_000_000, keep_bytes=1_000_000):
+    """Cap the app log. lockhunter.log is append-only during a run; once at
+    startup, if it has grown past `max_bytes`, keep only the newest
+    `keep_bytes` (trimmed to a whole line) and drop the rest. The rewrite is
+    atomic (temp file + os.replace), so a crash mid-rotation leaves the old
+    log intact rather than a truncated one."""
+    try:
+        if os.path.getsize(LOG_PATH) <= max_bytes:
+            return False
+    except OSError:
+        return False               # no log yet — nothing to rotate
+    try:
+        with open(LOG_PATH, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - keep_bytes))
+            tail = f.read()
+        nl = tail.find(b"\n")      # start at a whole line, not mid-line
+        if nl != -1:
+            tail = tail[nl + 1:]
+        tmp = LOG_PATH + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(b"[log rotated \xe2\x80\x94 older entries trimmed]\n")
+            f.write(tail)
+        os.replace(tmp, LOG_PATH)
+        return True
+    except OSError:
+        return False               # a locked/unreadable log is never fatal
+
+def _prune_image_cache(max_bytes=200_000_000, min_age_s=3600):
+    """Cap the thumbnail cache. The images/ folder only ever grows (every
+    thumbnail previewed is cached forever), so once at startup delete the
+    OLDEST files until the folder is back under `max_bytes`. Files newer than
+    `min_age_s` are never deleted — that also protects any download in
+    progress. Returns how many files were removed."""
+    try:
+        entries = list(os.scandir(IMG_DIR))
+    except OSError:
+        return 0                   # cache dir missing — nothing to prune
+    now = time.time()
+    total = 0
+    deletable = []                 # (mtime, size, path) — old files only
+    for e in entries:
+        try:
+            if not e.is_file(follow_symlinks=False):
+                continue
+            st = e.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        total += st.st_size
+        if now - st.st_mtime > min_age_s:
+            deletable.append((st.st_mtime, st.st_size, e.path))
+    if total <= max_bytes:
+        return 0
+    deletable.sort()               # oldest first
+    removed = 0
+    for mt, sz, path in deletable:
+        if total <= max_bytes:
+            break
+        try:
+            # Re-stat right before deleting: if the file was re-downloaded
+            # since the scan (fresh mtime), it's in use — leave it alone.
+            st2 = os.stat(path)
+            if st2.st_mtime != mt or time.time() - st2.st_mtime <= min_age_s:
+                continue
+            os.remove(path)
+            total -= sz
+            removed += 1
+        except OSError:
+            pass                   # a file in use just stays; try next time
+    return removed
 
 # ---------------------------------------------------------------- LPU sync
 
@@ -3763,6 +4243,33 @@ CANONICAL_BELTS = ["White", "Yellow", "Orange", "Green", "Blue", "Purple",
 # Rank for sorting by belt colour: White, Yellow, Orange, Green, Blue, Purple,
 # Brown, Red, Black, then Unranked/unknown last.
 BELT_RANK = {b: i for i, b in enumerate(CANONICAL_BELTS)}
+
+# Authoritative LPU belt colours, copied verbatim from the belt-explorer source
+# (lpu-belt-explorer/src/data/belts.js) so the Collection dashboard matches
+# lpubelts.com exactly. `line` is the accent LPU draws on the black/unranked
+# belts. Used for the belt swatches and progress bars.
+_BELT_COLORS = {
+    "White":  "#eeeeee", "Yellow": "#dcdc1f", "Orange": "#e16936",
+    "Green":  "#34732f", "Blue":   "#3e71bd", "Purple": "#9f21e5",
+    "Brown":  "#9d6837", "Red":    "#c52323", "Black":  "#000000",
+    "Unranked": "#000000",
+}
+_UNRANKED_GREY = "#8b939b"
+
+def _belt_swatch_color(belt):
+    """Fill colour for a belt swatch (the true LPU belt colour). Unranked has
+    no belt colour of its own — grey, so it can't be mistaken for Black."""
+    if belt == "Unranked":
+        return _UNRANKED_GREY
+    return _BELT_COLORS.get(belt, "#555a60")
+
+def _belt_bar_color(belt):
+    """Fill colour for a belt's progress bar. Black stays TRUE black — the bar
+    painter overlays a white-dot pattern so it reads on the dark UI (see
+    _build_belt_row). Unranked is grey."""
+    if belt == "Unranked":
+        return _UNRANKED_GREY
+    return _BELT_COLORS.get(belt, "#555a60")
 
 def _belt_rank(belt):
     """Sort rank for a belt label. Handles Black sub-tiers ('Black 3' -> Black)
@@ -4096,58 +4603,79 @@ def _bazaar_dataset(status_cb):
     if _bazaar_cache["data"] is not None and _bazaar_cache["at"] and (
             (now - _bazaar_cache["at"]).total_seconds() < 600):
         return _bazaar_cache["data"]
-    candidates = list(BAZAAR_DATA_URLS) + _discover_bazaar_feed()
     ua = {"User-Agent": _BROWSER_UA, "Accept": "application/json,*/*;q=0.8"}
-    for url in candidates:
-        try:
-            status_cb(f"Checking Lock Bazaar feed: {url}")
-            r = requests.get(url, headers=ua, timeout=45)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            if isinstance(data, dict):
-                # Field names VERIFIED against the lock-trackers generator
-                # (lpulocks-node/src/getLockbazaarListings.js):
-                #   validListings = FLAT per-listing rows carrying
-                #     name (= seller username), sellerId (= LPU profile id),
-                #     make, model, belt, price, url, available, listingType…
-                #   allEntries    = per-LOCK groups whose seller rows sit in a
-                #     nested `listings` list keyed sellerName.
-                # Prefer validListings — it is exactly the flat shape every
-                # matcher here expects. (The old order looked for a
-                # non-existent `listings` key and then flattened allEntries
-                # WITHOUT descending into its nested seller rows, which is
-                # why ★ for-sale sellers never showed up.)
-                if isinstance(data.get("validListings"), list) and data["validListings"]:
-                    data = data["validListings"]
-                elif isinstance(data.get("listings"), list) and data["listings"]:
-                    data = data["listings"]
-                elif isinstance(data.get("allEntries"), list) and data["allEntries"]:
-                    data = _flatten_bazaar_entries(data["allEntries"])
-                else:
-                    for k in ("entries", "data", "locks", "lots", "items"):
-                        if isinstance(data.get(k), list):
-                            data = data[k]
-                            break
-            if isinstance(data, list):
-                # non-lock listings (tools, gift certificates) must not be
-                # token-matched against lock names
-                data = [e for e in data
-                        if not (isinstance(e, dict) and
-                                str(e.get("listingType") or "").strip()
-                                in ("Tools", "Gift Certificate"))]
-            if isinstance(data, list) and data:
-                _bazaar_cache.update(data=data, at=now, url=url)
-                try:
-                    k0 = sorted((data[0] or {}).keys())[:8]
-                    log(f"Bazaar feed loaded: {len(data)} listings from "
-                        f"{url} (row keys: {', '.join(map(str, k0))}...)")
-                except Exception:
-                    pass
+
+    def _try(urls):
+        for url in urls:
+            data = _bazaar_fetch_one(url, ua, status_cb, now)
+            if data is not None:
                 return data
-        except Exception:
-            continue
-    return None
+        return None
+
+    # Known URLs FIRST — the confirmed data.lpulocks.com feed is normally a
+    # single instant request. Only if every known URL fails do we fall back to
+    # _discover_bazaar_feed(), which scrapes the site's JS bundles (~20 extra
+    # HTTP requests). Running discovery eagerly was the reason "Top Bazaar
+    # sellers" felt slow even when the known feed was up.
+    data = _try(BAZAAR_DATA_URLS)
+    if data is not None:
+        return data
+    status_cb("Known Bazaar feed URLs didn't respond — discovering from the site…")
+    return _try(_discover_bazaar_feed())
+
+
+def _bazaar_fetch_one(url, ua, status_cb, now):
+    """Fetch + parse a single Bazaar feed URL. Returns the listing list on
+    success (and fills the module cache), else None. Never raises."""
+    try:
+        status_cb(f"Checking Lock Bazaar feed: {url}")
+        r = requests.get(url, headers=ua, timeout=45)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if isinstance(data, dict):
+            # Field names VERIFIED against the lock-trackers generator
+            # (lpulocks-node/src/getLockbazaarListings.js):
+            #   validListings = FLAT per-listing rows carrying
+            #     name (= seller username), sellerId (= LPU profile id),
+            #     make, model, belt, price, url, available, listingType…
+            #   allEntries    = per-LOCK groups whose seller rows sit in a
+            #     nested `listings` list keyed sellerName.
+            # Prefer validListings — it is exactly the flat shape every
+            # matcher here expects. (The old order looked for a
+            # non-existent `listings` key and then flattened allEntries
+            # WITHOUT descending into its nested seller rows, which is
+            # why ★ for-sale sellers never showed up.)
+            if isinstance(data.get("validListings"), list) and data["validListings"]:
+                data = data["validListings"]
+            elif isinstance(data.get("listings"), list) and data["listings"]:
+                data = data["listings"]
+            elif isinstance(data.get("allEntries"), list) and data["allEntries"]:
+                data = _flatten_bazaar_entries(data["allEntries"])
+            else:
+                for k in ("entries", "data", "locks", "lots", "items"):
+                    if isinstance(data.get(k), list):
+                        data = data[k]
+                        break
+        if isinstance(data, list):
+            # non-lock listings (tools, gift certificates) must not be
+            # token-matched against lock names
+            data = [e for e in data
+                    if not (isinstance(e, dict) and
+                            str(e.get("listingType") or "").strip()
+                            in ("Tools", "Gift Certificate"))]
+        if isinstance(data, list) and data:
+            _bazaar_cache.update(data=data, at=now, url=url)
+            try:
+                k0 = sorted((data[0] or {}).keys())[:8]
+                log(f"Bazaar feed loaded: {len(data)} listings from "
+                    f"{url} (row keys: {', '.join(map(str, k0))}...)")
+            except Exception:
+                pass
+            return data
+        return None
+    except Exception:
+        return None
 
 def _flatten_bazaar_entries(entries):
     """Flatten `allEntries` (per-LOCK groups) into flat per-seller rows.
@@ -4167,6 +4695,12 @@ def _flatten_bazaar_entries(entries):
                 if not isinstance(L, dict):
                     continue
                 base = {"belt": L.get("belt") or belt,
+                        # carry the lock id so id-based matching
+                        # (bazaar_entries_for_lock_id / _bz_lock_id) still works
+                        # on this fallback feed shape, not just validListings.
+                        "id": L.get("id") or e.get("id", ""),
+                        "lpubeltsName": (L.get("lpubeltsName")
+                                         or e.get("lpubeltsName", "")),
                         "name": (L.get("sellerName") or L.get("name") or ""),
                         "sellerId": L.get("sellerId", ""),
                         "price": L.get("price", ""),
@@ -4194,6 +4728,8 @@ def _flatten_bazaar_entries(entries):
                     out.append({"make": mm.get("make", ""),
                                 "model": mm.get("model", ""),
                                 "belt": belt,
+                                "id": e.get("id", ""),
+                                "lpubeltsName": e.get("lpubeltsName", ""),
                                 "url": e.get("url", ""),
                                 "price": e.get("price", ""),
                                 "condition": e.get("condition", ""),
@@ -4328,12 +4864,22 @@ def _bz_url(e):
     u = str(e.get("url") or "").strip()
     if u:
         return u
+    # No per-listing url on this row: build the Bazaar deep-link for the lock,
+    # but make it unique PER SELLER. Otherwise two sellers of the same lock
+    # would produce the identical url and collide under listings.url UNIQUE,
+    # so INSERT OR IGNORE would silently drop all but the first seller. The
+    # extra &seller= param is ignored by the site but keeps the row distinct.
     lid = _bz_lock_id(e)
-    if not lid:
-        return "https://lpulocks.com/#/lockbazaar"
-    nm = urllib.parse.quote(_bz_lockname(e)
-                            or f"{_bz_make(e)} {_bz_model(e)}".strip())
-    return f"https://lpulocks.com/#/lockbazaar?id={lid}&name={nm}"
+    seller = _bz_seller(e) or str(e.get("sellerId") or "")
+    base = "https://lpulocks.com/#/lockbazaar"
+    if lid:
+        nm = urllib.parse.quote(_bz_lockname(e)
+                                or f"{_bz_make(e)} {_bz_model(e)}".strip())
+        base = f"{base}?id={lid}&name={nm}"
+    if seller:
+        sep = "&" if "?" in base else "?"
+        base = f"{base}{sep}seller={urllib.parse.quote(seller)}"
+    return base
 
 def bazaar_entries_for_lock_id(lock_id, data):
     """All Bazaar listings for an exact LPU lock id — the precise match,
@@ -5543,38 +6089,45 @@ def _parse_listings_json(text):
     """Extract the JSON array of listings from the model's text response,
     tolerant of markdown fences and surrounding prose."""
     cleaned = text.replace("```json", "").replace("```", "")
-    # Prefer the LAST top-level [...] block (the final answer). Balance brackets
-    # while IGNORING any '[' or ']' that appear inside JSON string values, so a
-    # bracket inside a title/notes field can't throw off the count.
-    starts = [i for i, c in enumerate(cleaned) if c == "["]
-    for start in reversed(starts):
-        depth = 0
-        in_str = False
-        esc = False
-        for j in range(start, len(cleaned)):
-            c = cleaned[j]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    in_str = False
-                continue
-            if c == '"':
-                in_str = True
-            elif c == "[":
-                depth += 1
-            elif c == "]":
+    # Single string-aware pass collecting only TOP-LEVEL [...] spans. A '[' or
+    # ']' inside a JSON string value (e.g. "notes":"n/a []") is skipped because
+    # we're `in_str` there, so it can neither open a span nor be chosen as a
+    # start — the previous version scanned from the LAST '[' regardless of
+    # whether it sat inside a string, which made `"notes":"no image []"` return
+    # an empty list and drop every real listing.
+    spans = []          # (start, end) of each balanced top-level array
+    depth = 0
+    start = None
+    in_str = False
+    esc = False
+    for i, c in enumerate(cleaned):
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "[":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "]":
+            if depth > 0:
                 depth -= 1
-                if depth == 0:
-                    chunk = cleaned[start:j + 1]
-                    try:
-                        out = json.loads(chunk)
-                        if isinstance(out, list):
-                            return out
-                    except json.JSONDecodeError:
-                        break  # try an earlier '['
+                if depth == 0 and start is not None:
+                    spans.append((start, i + 1))
+                    start = None
+    for s, e in reversed(spans):        # prefer the LAST top-level array
+        try:
+            out = json.loads(cleaned[s:e])
+            if isinstance(out, list):
+                return out
+        except json.JSONDecodeError:
+            continue
     return []
 
 # Signs (in page text) that an auction/listing has ended or is otherwise gone.
@@ -5845,6 +6398,7 @@ class LockHunter(tk.Tk):
     C_LINE = "#333b43"    # borders / separators
     C_SEL = "#2f3841"     # selection
     C_BAZAAR = "#5cc8ff"  # light blue — Lock Bazaar "found" highlight
+    C_DEAL = "#3fb950"    # green — "good price" (deal) row highlight
 
     def report_callback_exception(self, exc_type, exc_value, exc_tb):
         """Tk calls this when an exception escapes an event callback (a button
@@ -5897,8 +6451,12 @@ class LockHunter(tk.Tk):
         self.minsize(900, min(560, max(480, sh - 120)))
         self._set_window_icon()
         ensure_dirs()
+        _rotate_log()      # cap the log once per launch (atomic, best-effort)
+        # cap the thumbnail cache in the background so startup stays snappy
+        threading.Thread(target=_prune_image_cache, daemon=True).start()
         init_db()          # create tables + run migrations once
         self.cfg = load_cfg()
+        self._restore_window_geometry()   # reopen the way it was left
         _set_shipto_country(self.cfg.get("user_country") or "")
         self.q = queue.Queue()
         self._thumb_ref = None
@@ -5910,10 +6468,17 @@ class LockHunter(tk.Tk):
         conn.close()
         self._apply_theme()
         self._build_ui()
+        self._restore_results_sort()   # _build_ui reset the sort; reapply last
         self._reload_lock_names()
         self._refresh_table()
         self.after(150, self._poll)
         self.after(200, self._reapply_window_icon)   # re-assert icon once mapped
+        # remember-the-window: the app exits hard (os._exit) after mainloop,
+        # so window state is saved EAGERLY as it changes (debounced), plus one
+        # final flush on close — a move made <1s before closing still sticks.
+        self._win_save_after = None
+        self.bind("<Configure>", self._on_window_configure)
+        self.protocol("WM_DELETE_WINDOW", self._on_close_window)
         log("App started")
         conn = db()
         lpu_count = conn.execute(
@@ -5935,6 +6500,9 @@ class LockHunter(tk.Tk):
         # quiet background chores, staggered so startup stays snappy:
         self.after(4000, self._auto_update_check)      # once/day, silent
         self.after(6000, self._start_bazaar_watch)     # "new on the Bazaar?"
+        # Load exchange rates in the background so the price filter and deal
+        # score work from the first view without waiting on a click.
+        self.after(3500, self._ensure_rates_async)
 
     def _first_run_setup(self):
         # The Claude API key is ONLY needed for the optional AI web search, so
@@ -6321,6 +6889,98 @@ class LockHunter(tk.Tk):
                               ("pressed", self.C_ACCENT)])
 
     # ---- UI construction
+    # ---------- remember-the-window ----------
+    # Tk reports geometry as WxH+X+Y where a NEGATIVE coordinate (a window on
+    # a monitor left of / above the primary) appears as "+-880" — the "+" is
+    # the separator, the "-" belongs to the number. (A bare "-880" would mean
+    # "measured from the right screen edge" — different thing entirely.)
+    _GEOM_RE = re.compile(r"^(\d{3,5})x(\d{3,5})\+(-?\d+)\+(-?\d+)$")
+
+    def _restore_window_geometry(self):
+        """Reapply the last session's window size/position/maximized state
+        (saved eagerly by _save_window_state). Off-screen or nonsense values
+        are clamped so the window always comes back reachable — e.g. after
+        unplugging the monitor it was last on."""
+        m = self._GEOM_RE.match(str(self.cfg.get("win_geometry") or ""))
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            x, y = int(m.group(3)), int(m.group(4))
+            try:
+                sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            except Exception:
+                sw, sh = 1280, 800
+            w = max(900, min(w, sw))
+            h = max(560, min(h, sh - 90))   # keep clear of the taskbar,
+            # same reserve as the default first-launch geometry
+            # keep enough of the title bar on-screen to grab with the mouse
+            x = max(120 - w, min(x, sw - 120))
+            y = max(0, min(y, sh - 80))
+            # "+{x}" yields "+-880" for negative coords — that IS Tk's valid
+            # form for a negative coordinate (see _GEOM_RE note above)
+            self.geometry(f"{w}x{h}+{x}+{y}")
+        if self.cfg.get("win_zoomed"):
+            try:
+                self.state("zoomed")       # maximized (Windows)
+            except tk.TclError:
+                pass                       # not supported on this platform
+
+    def _restore_results_sort(self):
+        """Reapply the results table's last sort choice. Runs after _build_ui
+        (which resets _sort_col) and before the first _refresh_table."""
+        col = self.cfg.get("results_sort_col")
+        if col in ("lock", "title", "price", "site", "loc", "rarity"):
+            self._sort_col = col
+            self._sort_rev = bool(self.cfg.get("results_sort_rev"))
+            for c, base in self._res_heads.items():
+                mark = ""
+                if c == self._sort_col:
+                    mark = "  ▼" if self._sort_rev else "  ▲"
+                self.tree.heading(c, text=base + mark)
+
+    def _on_window_configure(self, evt=None):
+        # A binding on a toplevel fires for its DESCENDANT widgets too — only
+        # the window's own moves/resizes matter here.
+        if evt is not None and evt.widget is not self:
+            return
+        if getattr(self, "_win_save_after", None) is not None:
+            try:
+                self.after_cancel(self._win_save_after)
+            except Exception:
+                pass
+        self._win_save_after = self.after(750, self._save_window_state)
+
+    def _on_close_window(self):
+        """Close button: flush the (debounced) window state, then close as
+        before. destroy() ends mainloop, after which the existing hard-exit
+        path (os._exit) runs unchanged."""
+        try:
+            self._save_window_state()
+        except Exception:
+            pass
+        self.destroy()
+
+    def _save_window_state(self):
+        """Debounced <Configure> target: persist zoomed state and (when not
+        maximized) the normal geometry, so the next launch reopens the same."""
+        self._win_save_after = None
+        try:
+            zoomed = (self.state() == "zoomed")
+            geom = self.geometry()
+        except Exception:
+            return
+        changed = False
+        if zoomed != bool(self.cfg.get("win_zoomed")):
+            self.cfg["win_zoomed"] = zoomed
+            changed = True
+        # While maximized, keep the last NORMAL geometry saved so
+        # un-maximizing next session restores a sensible size.
+        if (not zoomed and self._GEOM_RE.match(geom)
+                and geom != self.cfg.get("win_geometry")):
+            self.cfg["win_geometry"] = geom
+            changed = True
+        if changed:
+            save_cfg(self.cfg)
+
     def _card(self, parent, title):
         """A raised panel with a title strip — the building block of the UI."""
         outer = tk.Frame(parent, bg=self.C_LINE, bd=0, highlightthickness=0)
@@ -6374,7 +7034,7 @@ class LockHunter(tk.Tk):
                 self.bind_all(seq, self._go_back_tab)
             except tk.TclError:
                 pass
-        for name in ("Search", "Locks", "Compare", "Owners"):
+        for name in ("Search", "Locks", "Collection", "Compare", "Owners"):
             b = tk.Label(tabbar, text=name, bg=self.C_PANEL2, fg=self.C_MUTE,
                          font=("Segoe UI Semibold", 11), padx=22, pady=10,
                          cursor="hand2")
@@ -6388,11 +7048,13 @@ class LockHunter(tk.Tk):
         self._pages.pack(fill="both", expand=True)
         self.page_search = tk.Frame(self._pages, bg=self.C_BG)
         self.page_locks = tk.Frame(self._pages, bg=self.C_BG)
+        self.page_collection = tk.Frame(self._pages, bg=self.C_BG)
         self.page_compare = tk.Frame(self._pages, bg=self.C_BG)
         self.page_owners = tk.Frame(self._pages, bg=self.C_BG)
 
         self._build_search_tab(self.page_search)
         self._build_locks_tab(self.page_locks)
+        self._build_collection_tab(self.page_collection)
         self._build_compare_tab(self.page_compare)
         self._build_owners_tab(self.page_owners)
 
@@ -6443,14 +7105,42 @@ class LockHunter(tk.Tk):
                 b.config(fg=self.C_MUTE, bg=self.C_PANEL2)
         self.page_search.pack_forget()
         self.page_locks.pack_forget()
+        self.page_collection.pack_forget()
         self.page_compare.pack_forget()
         self.page_owners.pack_forget()
         page = {"Search": self.page_search, "Locks": self.page_locks,
+                "Collection": self.page_collection,
                 "Compare": self.page_compare,
                 "Owners": self.page_owners}.get(name, self.page_search)
         page.pack(fill="both", expand=True)
         if name == "Locks":
             self._refresh_locks_table()
+        elif name == "Collection":
+            self._refresh_collection_tab()
+        # mouse-wheel scrolls the Collection dashboard while it's the visible
+        # tab (bound app-wide there because wheel events land on whichever
+        # child widget is under the pointer); unbound on every other tab
+        if name == "Collection":
+            self.bind_all("<MouseWheel>", self._coll_wheel)
+        else:
+            self.unbind_all("<MouseWheel>")
+
+    def _coll_wheel(self, e):
+        """Wheel-scroll the Collection dashboard — except over its Treeviews,
+        which scroll themselves (avoids double-scrolling)."""
+        w = None
+        try:
+            w = self.winfo_containing(e.x_root, e.y_root)
+        except Exception:
+            pass
+        while w is not None:
+            if isinstance(w, ttk.Treeview):
+                return
+            w = getattr(w, "master", None)
+        try:
+            self._coll_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        except Exception:
+            pass
 
     def _go_back_tab(self, _e=None):
         """Mouse 'back' button: return to the previously-viewed tab."""
@@ -6459,6 +7149,311 @@ class LockHunter(tk.Tk):
             prev = hist.pop()
             self._show_tab(prev, record=False)
         return "break"
+
+    # ---------- COLLECTION TAB (LPU-belt-styled dashboard) ----------
+    def _build_collection_tab(self, wrap):
+        """Static structure of the Collection dashboard; data is filled by
+        _refresh_collection_tab (on tab show, and after a profile import).
+        Styled after lpubelts.com: belts in White→Black order, each in its
+        official LPU belt colour, with a completion bar.
+
+        The whole tab is VERTICALLY SCROLLABLE (canvas + inner frame): the
+        dashboard is taller than smaller windows, and without this the
+        RAREST YOU OWN / RAREST YOU'RE MISSING cards at the bottom were
+        simply pushed off-screen."""
+        holder = tk.Frame(wrap, bg=self.C_BG)
+        holder.pack(fill="both", expand=True)
+        cv = tk.Canvas(holder, bg=self.C_BG, highlightthickness=0, bd=0)
+        vs = ttk.Scrollbar(holder, orient="vertical", command=cv.yview)
+        cv.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        cv.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(cv, bg=self.C_BG)
+        win = cv.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.bind("<Configure>",
+                lambda e: cv.itemconfigure(win, width=e.width))
+        self._coll_canvas = cv
+        pad = tk.Frame(inner, bg=self.C_BG)
+        pad.pack(fill="both", expand=True, padx=14, pady=12)
+
+        # Top card: summary + belt-progress bars
+        top_card, top = self._card(pad, "MY COLLECTION")
+        top_card.pack(fill="x")
+        self.coll_summary_var = tk.StringVar(value="")
+        tk.Label(top, textvariable=self.coll_summary_var, bg=self.C_PANEL,
+                 fg=self.C_TEXT, font=("Segoe UI", 11), justify="left",
+                 anchor="w").pack(fill="x", pady=(0, 8))
+        tk.Label(top, text="Belt progress", bg=self.C_PANEL, fg=self.C_MUTE,
+                 font=("Segoe UI Semibold", 9)).pack(anchor="w")
+        # container the belt rows get (re)built into on refresh
+        self.coll_belts = tk.Frame(top, bg=self.C_PANEL)
+        self.coll_belts.pack(fill="x", pady=(4, 0))
+        self.coll_empty_var = tk.StringVar(value="")
+        tk.Label(top, textvariable=self.coll_empty_var, bg=self.C_PANEL,
+                 fg=self.C_MUTE, font=("Segoe UI", 10), justify="left",
+                 wraplength=900, anchor="w").pack(fill="x")
+
+        # Middle: "Hunt next" ranked wishlist
+        hn_card, hn = self._card(pad, "HUNT NEXT  —  your wishlist, most gettable first")
+        hn_card.pack(fill="both", expand=True, pady=(12, 0))
+        tk.Label(hn, text=("Ranked by how often each wishlist lock has actually "
+                           "shown up in your searches, then by how common it is. "
+                           "“Grab it” = shows up often; “Grail” "
+                           "= rarely seen and rare."),
+                 bg=self.C_PANEL, fg=self.C_MUTE, font=("Segoe UI", 9),
+                 justify="left", wraplength=900, anchor="w").pack(
+            fill="x", pady=(0, 6))
+        hn_tbl = tk.Frame(hn, bg=self.C_PANEL)
+        hn_tbl.pack(fill="both", expand=True)
+        hn_cols = ("lock", "belt", "rarity", "seen", "price", "verdict")
+        hn_heads = ("Lock", "Belt", "Rarity", "Times seen", "Typical price",
+                    "Verdict")
+        hn_w = (200, 90, 70, 90, 120, 130)
+        self.huntnext_tree = ttk.Treeview(hn_tbl, columns=hn_cols,
+                                          show="headings", height=8)
+        for c, h, w in zip(hn_cols, hn_heads, hn_w):
+            self.huntnext_tree.heading(c, text=h)
+            self.huntnext_tree.column(c, width=w, anchor="w")
+        hn_vs = ttk.Scrollbar(hn_tbl, orient="vertical",
+                              command=self.huntnext_tree.yview)
+        self.huntnext_tree.configure(yscrollcommand=hn_vs.set)
+        hn_vs.pack(side="right", fill="y")
+        self.huntnext_tree.pack(side="left", fill="both", expand=True)
+        self.huntnext_tree.tag_configure("odd", background=self.C_PANEL)
+        self.huntnext_tree.tag_configure("even", background=self.C_FIELD)
+        self.huntnext_tree.tag_configure("grab", foreground=self.C_DEAL)
+        self.huntnext_tree.bind("<Double-1>", self._huntnext_open)
+        self._huntnext_names = {}   # iid -> lock name (for double-click search)
+
+        # Bottom: rarest owned | rarest missing, side by side
+        rare_row = tk.Frame(pad, bg=self.C_BG)
+        rare_row.pack(fill="x", pady=(12, 0))
+        own_card, own = self._card(rare_row, "RAREST YOU OWN")
+        own_card.pack(side="left", fill="both", expand=True, padx=(0, 7))
+        self.rarest_own_tree = self._mk_rarest_tree(own)
+        miss_card, miss = self._card(rare_row, "RAREST YOU'RE MISSING")
+        miss_card.pack(side="left", fill="both", expand=True, padx=(7, 0))
+        self.rarest_miss_tree = self._mk_rarest_tree(miss)
+
+    def _mk_rarest_tree(self, parent):
+        holder = tk.Frame(parent, bg=self.C_PANEL)
+        holder.pack(fill="both", expand=True)
+        cols = ("lock", "belt", "rarity")
+        heads = ("Lock", "Belt", "Rarity")
+        tree = ttk.Treeview(holder, columns=cols, show="headings", height=7)
+        for c, h, w in zip(cols, heads, (190, 90, 70)):
+            tree.heading(c, text=h)
+            tree.column(c, width=w, anchor="w")
+        vs = ttk.Scrollbar(holder, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vs.set)
+        vs.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        tree.tag_configure("odd", background=self.C_PANEL)
+        tree.tag_configure("even", background=self.C_FIELD)
+        return tree
+
+    def _collection_stats(self):
+        """Compute the dashboard's data from LOCAL tables only (no network):
+        per-belt owned/total, owned/wishlist totals, rarest owned/missing.
+        Returns a dict."""
+        conn = db()
+        try:
+            total_by_belt = {b: 0 for b in CANONICAL_BELTS}
+            for belt, n in conn.execute(
+                    "SELECT belt, COUNT(*) FROM locks GROUP BY belt"):
+                cb = _canonical_belt(belt or "")
+                total_by_belt[cb] = total_by_belt.get(cb, 0) + n
+            owned_by_belt = {b: 0 for b in CANONICAL_BELTS}
+            for belt, n in conn.execute(
+                    "SELECT l.belt, COUNT(*) FROM my_collection m"
+                    " JOIN locks l ON l.id=m.lock_id"
+                    " WHERE m.status='own' GROUP BY l.belt"):
+                cb = _canonical_belt(belt or "")
+                owned_by_belt[cb] = owned_by_belt.get(cb, 0) + n
+            n_own = conn.execute(
+                "SELECT COUNT(*) FROM my_collection WHERE status='own'"
+            ).fetchone()[0]
+            n_wish = conn.execute(
+                "SELECT COUNT(*) FROM my_collection WHERE status='wishlist'"
+            ).fetchone()[0]
+            n_cat = conn.execute("SELECT COUNT(*) FROM locks").fetchone()[0]
+            rarest_own = list(conn.execute(
+                "SELECT l.name, l.belt, l.owner_count, l.belt_full"
+                " FROM my_collection m"
+                " JOIN locks l ON l.id=m.lock_id"
+                " WHERE m.status='own' AND l.owner_count IS NOT NULL"
+                " ORDER BY l.owner_count ASC, l.name LIMIT 12"))
+            rarest_miss = list(conn.execute(
+                "SELECT name, belt, MIN(owner_count), belt_full FROM locks"
+                " WHERE owner_count IS NOT NULL AND id NOT IN"
+                " (SELECT lock_id FROM my_collection WHERE status='own')"
+                " GROUP BY name ORDER BY MIN(owner_count) ASC, name LIMIT 12"))
+        finally:
+            conn.close()
+        return {
+            "total_by_belt": total_by_belt, "owned_by_belt": owned_by_belt,
+            "n_own": n_own, "n_wish": n_wish, "n_cat": n_cat,
+            "rarest_own": rarest_own, "rarest_miss": rarest_miss,
+        }
+
+    def _refresh_collection_tab(self):
+        """Repopulate the whole dashboard from current local data."""
+        st = self._collection_stats()
+        # summary line
+        cat = st["n_cat"] or 0
+        owned_cat = sum(st["owned_by_belt"].values())
+        pct = (100.0 * owned_cat / cat) if cat else 0.0
+        self.coll_summary_var.set(
+            f"Owned: {st['n_own']:,}     ·     Wishlist: {st['n_wish']:,}"
+            f"     ·     Catalog: {cat:,} locks"
+            f"     ·     Overall: {pct:.0f}% of the catalog owned")
+        if not cat:
+            self.coll_empty_var.set(
+                "The lock catalog is empty. Update the LPU catalog on the "
+                "Locks tab, then import your profile, and your belt progress "
+                "will appear here.")
+        elif not st["n_own"] and not st["n_wish"]:
+            self.coll_empty_var.set(
+                "No collection imported yet. On the Locks tab, click "
+                "“Update profile” to load your Owned and Wishlist "
+                "locks from lpubelts.com.")
+        else:
+            self.coll_empty_var.set("")
+        # belt progress bars (rebuild)
+        for w in self.coll_belts.winfo_children():
+            w.destroy()
+        belts = [b for b in CANONICAL_BELTS if b != "Unranked"]
+        if any(st["total_by_belt"].get(b) for b in CANONICAL_BELTS
+               if b == "Unranked"):
+            belts.append("Unranked")   # only show Unranked if it has locks
+        for belt in belts:
+            total = st["total_by_belt"].get(belt, 0)
+            owned = st["owned_by_belt"].get(belt, 0)
+            if total == 0 and owned == 0:
+                continue
+            self._build_belt_row(self.coll_belts, belt, owned, total)
+        # hunt next
+        self._refresh_hunt_next()
+        # rarest lists
+        self._fill_rarest(self.rarest_own_tree, st["rarest_own"])
+        self._fill_rarest(self.rarest_miss_tree, st["rarest_miss"])
+
+    def _build_belt_row(self, parent, belt, owned, total):
+        """One belt's progress row: swatch + name + LPU-coloured completion bar."""
+        row = tk.Frame(parent, bg=self.C_PANEL)
+        row.pack(fill="x", pady=1)
+        # belt swatch (true LPU colour; light border so black/white both read)
+        sw = tk.Frame(row, bg=_belt_swatch_color(belt),
+                      width=16, height=18,
+                      highlightthickness=1, highlightbackground="#555a60")
+        sw.pack(side="left", padx=(0, 8)); sw.pack_propagate(False)
+        tk.Label(row, text=belt, bg=self.C_PANEL, fg=self.C_TEXT,
+                 font=("Segoe UI", 10), width=9, anchor="w").pack(side="left")
+        # progress bar on a Canvas
+        bw, bh = 260, 16
+        cv = tk.Canvas(row, width=bw, height=bh, bg=self.C_FIELD,
+                       highlightthickness=1, highlightbackground=self.C_LINE)
+        cv.pack(side="left", padx=(4, 8))
+        frac = (owned / total) if total else 0.0
+        frac = max(0.0, min(1.0, frac))
+        if frac > 0:
+            fw = max(2, int(bw * frac))
+            cv.create_rectangle(0, 0, fw, bh,
+                                fill=_belt_bar_color(belt), width=0)
+            if belt == "Black":
+                # true-black bar on a dark UI needs help: overlay a staggered
+                # white-dot pattern across the filled part, so the Black belt
+                # keeps its real colour AND stays clearly visible. Dots are
+                # clipped to the fill (none drawn on the empty track).
+                for yy, x0 in ((4, 4), (11, 8)):
+                    for xx in range(x0, fw - 3, 9):
+                        cv.create_oval(xx, yy, xx + 2, yy + 2,
+                                       fill="#ffffff", width=0)
+        pct = (100.0 * frac)
+        tk.Label(row, text=f"{owned} / {total}   ({pct:.0f}%)",
+                 bg=self.C_PANEL, fg=self.C_MUTE,
+                 font=("Segoe UI", 9)).pack(side="left")
+
+    def _fill_rarest(self, tree, rows):
+        for r in tree.get_children():
+            tree.delete(r)
+        for i, (name, belt, cnt, belt_full) in enumerate(rows):
+            stars = _rarity_stars(cnt)
+            tree.insert("", "end",
+                        values=(name or "", _disp_belt(belt, belt_full),
+                                stars),
+                        tags=("even" if i % 2 else "odd",))
+
+    def _refresh_hunt_next(self):
+        """Rank the wishlist by 'gettability': how often each lock has appeared
+        in listing_history (availability), then by how common it is (owner
+        count). Shows the typical USD price when rates are loaded."""
+        tree = self.huntnext_tree
+        for r in tree.get_children():
+            tree.delete(r)
+        self._huntnext_names = {}
+        conn = db()
+        try:
+            wish = list(conn.execute(
+                "SELECT l.name, l.belt, MIN(l.owner_count), l.belt_full"
+                " FROM my_collection m"
+                " JOIN locks l ON l.id=m.lock_id"
+                " WHERE m.status='wishlist' GROUP BY l.name"))
+            rates = _rates_cache.get("rates")
+            items = []
+            for name, belt, owner_count, belt_full in wish:
+                seen, usd_prices = 0, []
+                for pr, cur in conn.execute(
+                        "SELECT price, currency FROM listing_history"
+                        " WHERE lock_name=?", (name,)):
+                    seen += 1
+                    if rates:
+                        u = _usd_estimate(pr, cur, rates)
+                        if u is not None:
+                            usd_prices.append(u)
+                typ = _median(usd_prices) if usd_prices else None
+                items.append((name, belt, owner_count, seen, typ, belt_full))
+        finally:
+            conn.close()
+        # sort: most-seen first (most available), then most common (higher
+        # owner_count), then name.
+        items.sort(key=lambda t: (-t[3], -(t[2] or 0), (t[0] or "").lower()))
+        for i, (name, belt, owner_count, seen, typ, belt_full) in enumerate(items):
+            stars = _rarity_stars(owner_count)
+            price_s = f"~${typ:,.0f}" if typ is not None else "—"
+            # verdict
+            common = (owner_count or 0) >= 26   # 1-2 stars = common
+            rare = (owner_count is not None and owner_count <= 15)  # 4-5 stars
+            if seen >= 3:
+                verdict = "Grab it" if common else "Shows up often"
+            elif seen >= 1:
+                verdict = "Keep hunting"
+            else:
+                verdict = "Grail — pounce" if rare else "Not seen yet"
+            tags = ["even" if i % 2 else "odd"]
+            if verdict in ("Grab it", "Shows up often"):
+                tags.append("grab")
+            iid = tree.insert("", "end",
+                              values=(name or "", _disp_belt(belt, belt_full),
+                                      stars, seen, price_s, verdict),
+                              tags=tuple(tags))
+            self._huntnext_names[iid] = name or ""
+
+    def _huntnext_open(self, _e=None):
+        """Double-click a Hunt-next row -> run a search for that lock."""
+        sel = self.huntnext_tree.selection()
+        if not sel:
+            return
+        name = self._huntnext_names.get(sel[0], "")
+        if name:
+            self._show_tab("Search")
+            try:
+                self.lock_var.set(name)
+                self._on_lock_selected()
+            except Exception:
+                pass
 
     # ---------- COMPARE TAB ----------
     def _build_compare_tab(self, wrap):
@@ -7133,7 +8128,7 @@ class LockHunter(tk.Tk):
         self.wishtop_btn.pack(side="left", padx=(10, 0))
         self.bztop_btn = FlatButton(
             ctrl, "Top Bazaar sellers",
-            command=self._show_bazaar_top_sellers, kind="outline")
+            command=self._start_bazaar_top_sellers, kind="outline")
         self.bztop_btn.pack(side="left", padx=(10, 0))
         self.owners_export_btn = FlatButton(
             ctrl, "Export CSV", command=self._export_owners_csv,
@@ -7462,7 +8457,13 @@ class LockHunter(tk.Tk):
         if self._owners_cache:
             self._show_wishlist_top_owners()
             return
+        # Guard against a duplicate multi-minute leaderboard load already in
+        # flight (e.g. started from the Find box) \u2014 same guard as
+        # _run_or_load_owners. Without it, two loads could run in parallel.
+        if getattr(self, "_owners_loading", False):
+            return
         # load every listed collection first, then show the top owners
+        self._owners_loading = True
         self._owners_load_mode = "wishtop"
         self.owners_btn.config(state="disabled")
         self.owners_refresh_btn.config(state="disabled")
@@ -7690,6 +8691,19 @@ class LockHunter(tk.Tk):
         if self._owners_cache:
             self._run_owner_search(self.owners_find_var.get().strip())
 
+    def _start_bazaar_top_sellers(self):
+        """Button entry point: warn about the brief freeze, then build the list.
+        (The automatic re-render after a feed download calls
+        _show_bazaar_top_sellers directly, so it doesn't re-prompt.)"""
+        if not messagebox.askokcancel(
+                "Top Bazaar sellers",
+                "Building the Top Bazaar sellers list can take up to about "
+                "15 seconds, and the window may look frozen while it works.\n\n"
+                "This is normal — please DON'T close it. Just wait for it to "
+                "finish.\n\nStart now?"):
+            return
+        self._show_bazaar_top_sellers()
+
     def _show_bazaar_top_sellers(self, bazaar_retry=True):
         """Rank the Lock Bazaar SELLERS by how many locks from YOUR wishlist
         they currently have listed for sale — like "Top wishlist owners", but
@@ -7907,9 +8921,11 @@ class LockHunter(tk.Tk):
 
         opts = tk.Frame(search, bg=self.C_PANEL)
         opts.grid(row=2, column=0, columnspan=4, sticky="w", pady=(10, 0))
-        self.pickup_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Exclude pickup / meetup-only",
-                        variable=self.pickup_var).pack(side="left", padx=(0, 18))
+        # "Exclude pickup / meetup-only" var lives here (created before the
+        # results strip); the CHECKBOX now sits on the results strip with the
+        # other display filters. Off (unchecked) by default.
+        self.pickup_var = tk.BooleanVar(
+            value=bool(self.cfg.get("exclude_pickup", False)))
         # Optional AI web search (OFF by default). The normal search is
         # FREE — it queries eBay, ~46 marketplaces, and the LPU Lock Bazaar
         # directly. Ticking this ALSO asks an Anthropic (Claude) AI model to
@@ -7922,14 +8938,14 @@ class LockHunter(tk.Tk):
             opts, text="Also use AI web search",
             variable=self.ai_var, command=self._toggle_ai_search)
         self.ai_check.pack(side="left", padx=(0, 18))
-        # Lock-only filter: drop same-name non-lock listings (e.g. "Sol"
-        # sunglasses when searching the "Sol 2500" lock). On by default.
+        # Lock-only filter var lives here (created before the results strip so
+        # early code can reference it); the CHECKBOX itself now sits on the
+        # results strip next to "Only eBay that ships to me". On by default.
+        # Always CHECKED on startup — every launch begins with lock-only
+        # filtering on, even if it was unticked in a previous session. You can
+        # still untick it for the current session; it just resets to on next
+        # launch.
         self.lockonly_var = tk.BooleanVar(value=True)
-        self.lockonly_check = ttk.Checkbutton(
-            opts, text="Lock results only",
-            variable=self.lockonly_var,
-            command=self._toggle_lock_filter)
-        self.lockonly_check.pack(side="left", padx=(0, 18))
         # Optional Facebook Marketplace search (OFF by default). Reads only
         # public listings (no login, nothing stored), sweeps ~10 country
         # markets for the single lock being searched, and runs one market at a
@@ -7992,21 +9008,61 @@ class LockHunter(tk.Tk):
                                      command=self._open_bazaar_for_lock, kind="outline")
         self.bazaar_btn.pack(fill="x"); self.bazaar_btn.set_enabled(False)
 
-        results_card, results = self._card(mainrow, "RESULTS")
+        # Build the RESULTS card WITHOUT the stock title bar so the heading and
+        # the Clear results / Open log buttons share ONE line, and the filter
+        # row sits directly beneath it — compact, so the table gets more height.
+        results_card, results = self._card(mainrow, "")
         results_card.pack(side="left", fill="both", expand=True)
+        # Title line: "RESULTS" heading + the FILTER controls (name filter,
+        # price range, site) share this line; Clear results / Open log on the
+        # right. The checkbox row below then starts at the left edge, directly
+        # under the word RESULTS, so every checkbox stays visible.
+        titlerow = tk.Frame(results, bg=self.C_PANEL)
+        titlerow.pack(fill="x", pady=(0, 6))
+        tk.Frame(titlerow, bg=self.C_ACCENT, width=3, height=14).pack(
+            side="left", padx=(0, 8))
+        tk.Label(titlerow, text="RESULTS", bg=self.C_PANEL, fg=self.C_ACCENT,
+                 font=("Segoe UI Semibold", 10)).pack(side="left")
+        # NOTE pack order = clipping priority: the FILTER controls are packed
+        # before the two utility buttons, so if the window is squeezed narrow
+        # it's the buttons that give way — never the filters.
+        self._field_label(titlerow, "Filter:").pack(side="left", padx=(14, 6))
+        self.filter_var = tk.StringVar()
+        fe = ttk.Entry(titlerow, textvariable=self.filter_var, width=13)
+        fe.pack(side="left"); fe.bind("<KeyRelease>", lambda *_: self._refresh_table())
+        # Price range (USD). Two small boxes: hide listings whose USD-estimated
+        # price falls outside [min, max]. Blank = no bound. Rows whose price
+        # can't be parsed/converted are KEPT (never hide on doubt). Needs live
+        # rates; typing a bound loads them in the background if not cached.
+        self._field_label(titlerow, "  $").pack(side="left", padx=(8, 2))
+        self.price_min_var = tk.StringVar()
+        pmin = ttk.Entry(titlerow, textvariable=self.price_min_var, width=6)
+        pmin.pack(side="left")
+        pmin.bind("<KeyRelease>", lambda *_: self._on_price_filter_changed())
+        self._field_label(titlerow, "–").pack(side="left", padx=(2, 2))
+        self.price_max_var = tk.StringVar()
+        pmax = ttk.Entry(titlerow, textvariable=self.price_max_var, width=6)
+        pmax.pack(side="left")
+        pmax.bind("<KeyRelease>", lambda *_: self._on_price_filter_changed())
+        # Site filter. Populated from the sites actually present in the current
+        # results (updated on every refresh); "All sites" shows everything.
+        self._field_label(titlerow, "  Site:").pack(side="left", padx=(8, 2))
+        self.site_filter_var = tk.StringVar(value="All sites")
+        self.site_filter_box = ttk.Combobox(
+            titlerow, textvariable=self.site_filter_var, width=14,
+            state="readonly", values=["All sites"])
+        self.site_filter_box.pack(side="left")
+        self.site_filter_box.bind("<<ComboboxSelected>>",
+                                  lambda *_: self._refresh_table())
+        # utility buttons LAST (they clip first on very narrow windows)
+        FlatButton(titlerow, "Open log",
+                   command=lambda: webbrowser.open(LOG_PATH),
+                   kind="subtle").pack(side="right")
+        FlatButton(titlerow, "Clear results", command=self._clear_results,
+                   kind="subtle").pack(side="right", padx=(0, 8))
+        # Checkbox row: starts at the LEFT edge (right under "RESULTS").
         fstrip = tk.Frame(results, bg=self.C_PANEL)
         fstrip.pack(fill="x", pady=(0, 8))
-        self._field_label(fstrip, "Filter:").pack(side="left", padx=(0, 6))
-        self.filter_var = tk.StringVar()
-        fe = ttk.Entry(fstrip, textvariable=self.filter_var, width=22)
-        fe.pack(side="left"); fe.bind("<KeyRelease>", lambda *_: self._refresh_table())
-        # Live count so the result set is never a mystery ("N results", and
-        # "showing first N of M" only in the extreme case the safety ceiling
-        # is hit).
-        self.results_count_var = tk.StringVar(value="")
-        tk.Label(fstrip, textvariable=self.results_count_var, bg=self.C_PANEL,
-                 fg=self.C_MUTE, font=("Segoe UI", 10)).pack(side="left",
-                                                             padx=(10, 0))
         # Condition dropdown and "Hide non-shippable results" removed in
         # 4.7.5 — all results always show. Vars kept as inert defaults so any
         # stray references stay harmless.
@@ -8015,20 +9071,44 @@ class LockHunter(tk.Tk):
         # Optional USD estimate next to foreign prices (live rates, cached 12h)
         self.usd_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(fstrip, text="Show USD estimate", variable=self.usd_var,
-                        command=self._usd_toggled).pack(side="left", padx=4)
-        # "Ships to me" — a reversible display filter (needs a country set on
-        # the Search tab). Toggling ON opens each eBay listing to check, then
-        # hides only the ones that definitely won't ship here; toggling OFF
-        # shows them again. Works before or after a scan.
+                        command=self._usd_toggled).pack(side="left",
+                                                        padx=(0, 4))
+        # "Lock results only" — reversible display filter: hide token-matching
+        # non-lock listings (e.g. "Sol" sunglasses vs the "Sol 2500" lock).
+        # Toggle any time, before or after a scan. On by default.
+        self.lockonly_check = ttk.Checkbutton(
+            fstrip, text="Lock results only",
+            variable=self.lockonly_var, command=self._toggle_lock_filter)
+        self.lockonly_check.pack(side="left", padx=4)
+        # "Ships to me" — reversible display filter (needs a country set on the
+        # Search tab). Toggling ON opens each eBay listing to check, then hides
+        # only the ones that definitely won't ship here.
         self.shipto_check = ttk.Checkbutton(
             fstrip, text="Only eBay that ships to me",
             variable=self.shipto_var, command=self._toggle_shipto)
         self.shipto_check.pack(side="left", padx=4)
         self._apply_shipto_state()
-        FlatButton(fstrip, "Open log", command=lambda: webbrowser.open(LOG_PATH),
-                   kind="subtle").pack(side="right")
-        FlatButton(fstrip, "Clear results", command=self._clear_results,
-                   kind="subtle").pack(side="right", padx=(0, 8))
+        # "Exclude pickup / meetup-only" — reversible display filter (hides
+        # rows the source marked local-pickup-only). Toggle any time.
+        ttk.Checkbutton(fstrip, text="Exclude pickup / meetup-only",
+                        variable=self.pickup_var,
+                        command=self._toggle_pickup).pack(side="left", padx=4)
+        # "Translate titles" — FREE full-title translation of foreign results
+        # into English (display only). Best-effort: when the free translation
+        # endpoint can't be reached, titles quietly keep the built-in glossary.
+        self.translate_var = tk.BooleanVar(
+            value=bool(self.cfg.get("translate_titles")))
+        ttk.Checkbutton(fstrip, text="Translate titles",
+                        variable=self.translate_var,
+                        command=self._toggle_translate).pack(side="left",
+                                                             padx=4)
+        # Live count so the result set is never a mystery ("N results", and
+        # "showing first N of M" only in the extreme case the safety ceiling
+        # is hit). Right-aligned, packed LAST so it clips first when narrow.
+        self.results_count_var = tk.StringVar(value="")
+        tk.Label(fstrip, textvariable=self.results_count_var, bg=self.C_PANEL,
+                 fg=self.C_MUTE, font=("Segoe UI", 10)).pack(side="right",
+                                                             padx=(10, 0))
 
         table = tk.Frame(results, bg=self.C_PANEL)
         table.pack(fill="both", expand=True)
@@ -8070,6 +9150,9 @@ class LockHunter(tk.Tk):
         self.tree.bind("<Leave>", lambda _e: self._thumb_hide(), add="+")
         self.tree.tag_configure("odd", background=self.C_PANEL)
         self.tree.tag_configure("even", background=self.C_FIELD)
+        # "Good price" rows (deal score) get a green foreground, layered on top
+        # of the odd/even background stripe.
+        self.tree.tag_configure("deal", foreground=self.C_DEAL)
         # "Scan in progress…" overlay, shown centered over the table while a
         # search runs. Created hidden; place()/place_forget() toggles it.
         self._scan_table = table
@@ -8121,17 +9204,27 @@ class LockHunter(tk.Tk):
         # "My wishlist" views (it always hunts the WISHLIST regardless of the
         # view, honoring the belt filter). Runs the FREE (no-API-credit) search
         # for every wishlist lock. Can take a while and return a lot.
+        # "Only new searches" — the same hunt, but shows only listings that are
+        # new since the last wishlist search. Greyed out until a first wishlist
+        # search has laid down a baseline to diff against. Packed FIRST so it
+        # sits on the RIGHT (swapped with "Search for Wishlist Locks").
+        self.hunt_new_btn = FlatButton(
+            ctrl, "Only new searches",
+            command=lambda: self._toggle_wishlist_hunt(True), kind="outline")
+        self.hunt_new_btn.pack(side="right", padx=(0, 10))
+        # Full wishlist hunt — now on the LEFT of the pair.
         self.hunt_wishlist_btn = FlatButton(
             ctrl, "Search for Wishlist Locks",
             command=lambda: self._toggle_wishlist_hunt(False), kind="outline")
         self.hunt_wishlist_btn.pack(side="right", padx=(0, 10))
-        # "New Wishlist Search" — the same hunt, but shows only listings that
-        # are new since the last wishlist search. Greyed out until a first
-        # wishlist search has laid down a baseline to diff against.
-        self.hunt_new_btn = FlatButton(
-            ctrl, "New Wishlist Search",
-            command=lambda: self._toggle_wishlist_hunt(True), kind="outline")
-        self.hunt_new_btn.pack(side="right", padx=(0, 10))
+        # Batch hunt — any set of locks: the selected rows (Ctrl/Shift-click),
+        # or the whole filtered view when nothing is selected ("every Purple I
+        # don't own" = Belt: Purple + this button). Same FREE engine as the
+        # wishlist hunt; never touches the wishlist "only new" baseline.
+        self.hunt_batch_btn = FlatButton(
+            ctrl, "Hunt these locks",
+            command=self._toggle_batch_hunt, kind="outline")
+        self.hunt_batch_btn.pack(side="right", padx=(0, 10))
         self._sync_hunt_wishlist_button()
         self.locks_count_var = tk.StringVar(value="")
         tk.Label(ctrl, textvariable=self.locks_count_var, bg=self.C_PANEL, fg=self.C_MUTE,
@@ -8400,11 +9493,15 @@ class LockHunter(tk.Tk):
             self.q.put(("status", f"Thumbnail failed: {ex}"))
 
     def _locks_context_menu(self, evt):
-        # select the row under the cursor, then show a right-click menu
+        # select the row under the cursor, then show a right-click menu.
+        # A right-click INSIDE an existing multi-selection keeps it (so
+        # "Hunt the selected locks" works on Ctrl/Shift-picked rows); a
+        # right-click elsewhere selects just that row, as before.
         iid = self.locks_tree.identify_row(evt.y)
         if not iid:
             return
-        self.locks_tree.selection_set(iid)
+        if iid not in self.locks_tree.selection():
+            self.locks_tree.selection_set(iid)
         name = getattr(self, "_locks_names", {}).get(iid)
         if not name:
             return
@@ -8413,6 +9510,10 @@ class LockHunter(tk.Tk):
                        bd=0)
         menu.add_command(label=f"Search for “{name}”",
                          command=lambda: self._search_lock_from_locks_tab(name))
+        n_sel = len(self.locks_tree.selection())
+        if n_sel > 1 and not getattr(self, "_wishlist_hunt_running", False):
+            menu.add_command(label=f"Hunt the {n_sel} selected locks",
+                             command=self._start_batch_hunt)
         menu.add_command(label="Open LPU page",
                          command=lambda: self._locks_open_page(None))
         try:
@@ -8421,10 +9522,96 @@ class LockHunter(tk.Tk):
             menu.grab_release()
 
     def _toggle_lock_filter(self):
-        """Enable/disable the lock-context result filter (module-level flag the
-        probes read)."""
-        global _LOCK_CONTEXT_FILTER
-        _LOCK_CONTEXT_FILTER = bool(self.lockonly_var.get())
+        """'Lock results only' is now a reversible DISPLAY filter (like 'ships
+        to me'): every token-matching result is stored during a scan, and this
+        just hides/shows the non-lock ones. Toggle any time, before or after a
+        scan — no re-search."""
+        self.cfg["lock_only"] = bool(self.lockonly_var.get())
+        save_cfg(self.cfg)
+        self._refresh_table()
+
+    def _toggle_pickup(self):
+        """'Exclude pickup / meetup-only' is now a reversible DISPLAY filter:
+        pickup-only rows are stored during a scan and this hides/shows them.
+        Toggle any time, before or after a scan — no re-search."""
+        self.cfg["exclude_pickup"] = bool(self.pickup_var.get())
+        save_cfg(self.cfg)
+        self._refresh_table()
+
+    def _toggle_translate(self):
+        """'Translate titles' — reversible DISPLAY option: foreign titles show
+        an English translation from the FREE translation endpoint (fetched in
+        the background, cached for the session). Off, or when the endpoint is
+        unreachable, titles show the built-in glossary instead. Never changes
+        stored titles, filters, or exports."""
+        self.cfg["translate_titles"] = bool(self.translate_var.get())
+        save_cfg(self.cfg)
+        if self.translate_var.get():
+            _TRANSLATE_FAILED.clear()   # toggling on = user asking to retry
+            # bump the generation so a worker already in flight can't re-add
+            # its failures AFTER this clear (which would eat the retry)
+            self._translate_gen = getattr(self, "_translate_gen", 0) + 1
+        self._refresh_table()   # a refresh also kicks off translation if on
+
+    def _display_title(self, title):
+        """The Title cell for one row: the cached English translation when
+        'Translate titles' is on and available, else the glossed original."""
+        tv = getattr(self, "translate_var", None)
+        if tv is not None and tv.get():
+            tr = _TRANSLATE_CACHE.get(title)
+            if tr:
+                return tr
+        return _glossed_title(title)
+
+    def _maybe_translate_async(self):
+        """Fetch translations for the visible untranslated foreign titles, in
+        one background thread. Skipped while a scan/hunt is filling the table
+        (one batch at the end covers everything) or while a fetch is already
+        running. Failures are silent — the glossary display stands in."""
+        if not self.translate_var.get():
+            return
+        if getattr(self, "_translating", False):
+            return
+        if getattr(self, "_wishlist_hunt_running", False):
+            return
+        try:
+            if self.scan_overlay.winfo_ismapped():
+                return               # mid-scan: wait for the final refresh
+        except Exception:
+            pass
+        titles = [t for t in getattr(self, "_visible_titles", [])
+                  if t not in _TRANSLATE_CACHE and t not in _TRANSLATE_FAILED
+                  and _needs_translation(t)]
+        if not titles:
+            return
+        titles = titles[:80]
+        self._translating = True
+        gen = getattr(self, "_translate_gen", 0)
+
+        def worker():
+            try:
+                got = translate_titles_free(titles)
+                _TRANSLATE_CACHE.update(got)
+                # only record failures if the user hasn't re-toggled the
+                # checkbox meanwhile (that clear = an explicit retry request)
+                if getattr(self, "_translate_gen", 0) == gen:
+                    for t in titles:
+                        if t not in got:
+                            _TRANSLATE_FAILED.add(t)
+                if got:
+                    self.q.put(("status", log(
+                        f"Translated {len(got)} title(s).")))
+                else:
+                    self.q.put(("status", log(
+                        "Translation service unreachable — showing the "
+                        "glossary instead.")))
+            finally:
+                self._translating = False
+                self.q.put(("refresh_table", None))
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            self._translating = False   # spawn failed — never wedge the flag
 
     def _fb_rate_check(self):
         """Rolling-window Facebook rate limit. Returns (allowed, wait_minutes,
@@ -8639,7 +9826,7 @@ class LockHunter(tk.Tk):
         if btn is not None:
             btn.config(text="Cancelling…")
             btn.set_enabled(False)
-        self.status.set("Cancelling wishlist hunt after the current lock…")
+        self.status.set("Cancelling hunt after the current lock…")
 
     def _set_hunt_wishlist_enabled(self, on):
         btn = getattr(self, "hunt_wishlist_btn", None)
@@ -8661,7 +9848,7 @@ class LockHunter(tk.Tk):
             wb.set_enabled(view_ok)
         nb = getattr(self, "hunt_new_btn", None)
         if nb is not None:
-            nb.config(text="New Wishlist Search")
+            nb.config(text="Only new searches")
             nb.set_enabled(view_ok and _wl_has_baseline())
 
     def _wishlist_locks(self, belt):
@@ -8677,6 +9864,122 @@ class LockHunter(tk.Tk):
         rows = conn.execute(q, params).fetchall()
         conn.close()
         return [r[0] for r in rows if r[0]]
+
+    # ---------- batch hunts (any set of locks, not just the wishlist) ------
+    def _owned_lock_names(self):
+        """Names of every lock marked as owned (a set, for fast exclusion)."""
+        conn = db()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT l.name FROM locks l"
+                " JOIN my_collection m ON m.lock_id=l.id"
+                " WHERE m.status='own'").fetchall()
+        finally:
+            conn.close()
+        return {r[0] for r in rows if r[0]}
+
+    def _batch_hunt_names(self):
+        """What 'Hunt these locks' would search right now: the hand-picked
+        selection if any rows are selected, otherwise every lock in the
+        current filtered view — minus locks already owned, unless the view IS
+        'Locks I own' (then hunting owned locks is clearly intentional).
+        Returns (names, human description) — names deduped, view order."""
+        nmap = getattr(self, "_locks_names", {})
+        def _dedup(seq):
+            seen, out = set(), []
+            for n in seq:
+                if n and n not in seen:
+                    seen.add(n)
+                    out.append(n)
+            return out
+        sel = _dedup(nmap.get(i) for i in self.locks_tree.selection())
+        if sel:
+            return sel, f"the {len(sel)} selected lock(s)"
+        shown = _dedup(nmap.get(i) for i in self.locks_tree.get_children())
+        mode = self.locks_show_var.get()
+        belt = self.locks_belt_var.get()
+        view = mode if belt in ("", "All belts") else f"{mode}, {belt} belt"
+        find = self.locks_find_var.get().strip()
+        if find:
+            view += f", matching “{find}”"
+        # the Locks table displays at most 2000 rows — if the view hit that
+        # cap, say so instead of silently hunting only part of it
+        capped = ("\n(NOTE: the view is capped at 2000 rows — narrow the "
+                  "filter to hunt the rest)" if len(shown) >= 2000 else "")
+        if mode != "Locks I own":
+            owned = self._owned_lock_names()
+            kept = [n for n in shown if n not in owned]
+            skipped = len(shown) - len(kept)
+            desc = f"all {len(kept)} lock(s) shown ({view})"
+            if skipped:
+                desc += f"\n({skipped} you already own will be skipped)"
+            return kept, desc + capped
+        return shown, f"all {len(shown)} lock(s) shown ({view})" + capped
+
+    def _toggle_batch_hunt(self):
+        if getattr(self, "_wishlist_hunt_running", False):
+            self._cancel_wishlist_hunt()
+        else:
+            self._start_batch_hunt()
+
+    def _start_batch_hunt(self):
+        """Hunt an arbitrary set of locks — the selection, or the filtered
+        view — with the same FREE engine as the wishlist hunt. Never touches
+        the wishlist's 'only new' baseline (record_baseline=False)."""
+        if getattr(self, "_wishlist_hunt_running", False):
+            return
+        names, desc = self._batch_hunt_names()
+        if not names:
+            messagebox.showinfo(
+                "Lock Hunter",
+                "No locks to hunt — nothing is shown, or every lock shown is "
+                "already in your collection.")
+            return
+        big = ("\n\nThis is a BIG hunt — it searches ~46 sites per lock, so "
+               "it may take a long time. You can cancel any time; everything "
+               "found so far is kept.") if len(names) > 40 else ""
+        if not messagebox.askyesno(
+                "Hunt these locks",
+                f"Search all listings for {desc}?\n\n"
+                "Uses the FREE search (eBay + ~46 marketplaces + Lock Bazaar, "
+                "no API credits) — results appear on the Search tab as they "
+                "arrive." + big):
+            return
+        self._wishlist_hunt_running = True
+        self._wishlist_hunt_cancel = False
+        btn = getattr(self, "hunt_batch_btn", None)
+        self._hunt_active_btn = btn
+        if btn is not None:
+            btn.config(text="Cancel hunt")
+            btn.set_enabled(True)
+        for b in (getattr(self, "hunt_wishlist_btn", None),
+                  getattr(self, "hunt_new_btn", None)):
+            if b is not None:
+                b.set_enabled(False)
+        self._show_tab("Search")
+        try:
+            conn = db()
+            conn.execute("DELETE FROM listings")
+            conn.commit()
+            conn.close()
+        except sqlite3.Error:
+            pass
+        self._refresh_table()
+        self._show_scan_overlay(True)
+        threading.Thread(
+            target=self._wishlist_hunt_worker,
+            args=(names, "", True, False, False, "Batch", "locks"),
+            daemon=True).start()
+
+    def _sync_batch_hunt_button(self):
+        """Restore the batch-hunt button to idle (mirrors
+        _sync_hunt_wishlist_button; left alone while a hunt is running)."""
+        if getattr(self, "_wishlist_hunt_running", False):
+            return
+        b = getattr(self, "hunt_batch_btn", None)
+        if b is not None:
+            b.config(text="Hunt these locks")
+            b.set_enabled(True)
 
     def _start_wishlist_hunt(self, new_only=False):
         if self.locks_show_var.get() not in ("All locks", "My wishlist"):
@@ -8724,6 +10027,9 @@ class LockHunter(tk.Tk):
             active.set_enabled(True)
         if other is not None:
             other.set_enabled(False)
+        bb = getattr(self, "hunt_batch_btn", None)
+        if bb is not None:
+            bb.set_enabled(False)   # one hunt at a time
         # show results on the Search tab and clear the table once up front
         self._show_tab("Search")
         try:
@@ -8741,19 +10047,20 @@ class LockHunter(tk.Tk):
                          daemon=True).start()
 
     def _wishlist_hunt_worker(self, names, belt, lock_only=True,
-                              new_only=False):
+                              new_only=False, record_baseline=True,
+                              status_tag="Wishlist", hunt_noun="wishlist"):
         """Run the FREE search for each wishlist lock in turn, accumulating
         results into the listings table (no clear between locks). Free search =
         eBay scrape + all marketplace probes + Bazaar; never calls Claude.
-        `lock_only` sets the lock-context filter for this whole batch,
-        independent of the Search-tab checkbox; the checkbox state is restored
-        when the hunt finishes. When `new_only`, listings whose URL was already
-        found in the PREVIOUS wishlist search (the baseline) are not shown —
-        only genuinely new ones — but every listing found is still recorded so
-        the baseline advances to this run's full state."""
-        global _LOCK_CONTEXT_FILTER
-        prev_filter = _LOCK_CONTEXT_FILTER
-        _LOCK_CONTEXT_FILTER = bool(lock_only)
+        Lock-context filtering is now a display-time toggle (the "Lock results
+        only" box), so the hunt no longer touches any scrape-time filter flag;
+        `lock_only` is accepted for signature compatibility but unused. When
+        `new_only`, listings whose URL was already found in the PREVIOUS
+        wishlist search (the baseline) are not shown — only genuinely new ones —
+        but every listing found is still recorded so the baseline advances to
+        this run's full state. Batch hunts (any set of locks, not just the
+        wishlist) reuse this worker with record_baseline=False so they never
+        pollute the wishlist's "only new" baseline."""
         baseline = getattr(self, "_wl_baseline", set())
         all_urls = set()
         total = len(names)
@@ -8761,13 +10068,13 @@ class LockHunter(tk.Tk):
         try:
             for i, lock_name in enumerate(names, 1):
                 if getattr(self, "_wishlist_hunt_cancel", False):
-                    self.q.put(("status", log("Wishlist hunt cancelled.")))
+                    self.q.put(("status", log(f"{status_tag} hunt cancelled.")))
                     break
                 self.q.put(("status", log(
-                    f"[Wishlist {i}/{total}] searching “{lock_name}”…")))
+                    f"[{status_tag} {i}/{total}] searching “{lock_name}”…")))
                 if hasattr(self, "scan_overlay"):
                     self.q.put(("scanmsg",
-                                f"Hunting wishlist… {i}/{total}\n{lock_name}"))
+                                f"Hunting {hunt_noun}… {i}/{total}\n{lock_name}"))
                 results = []
                 # Expand the catalog name into every query: as written, each
                 # slash-separated lock, and a broadened variant of each
@@ -8780,9 +10087,10 @@ class LockHunter(tk.Tk):
                 cb = lambda s: self.q.put(("status", s))
                 # eBay (API if configured + direct scrape) runs in the
                 # BACKGROUND while the big marketplace sweep runs below —
-                # same overlap as the single-search worker.
+                # same overlap as the single-search worker. I/O-bound, so more
+                # workers just overlap network waits (same requests, sooner).
                 phase_pool = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=4)
+                    max_workers=8)
                 try:
                     efuts = []
                     for comp in comps:
@@ -8856,33 +10164,28 @@ class LockHunter(tk.Tk):
                         conn.close()
                 grand += stored
                 self.q.put(("status", log(
-                    f"[Wishlist {i}/{total}] “{lock_name}” -> {stored} new "
+                    f"[{status_tag} {i}/{total}] “{lock_name}” -> {stored} new "
                     f"(total {grand}).")))
                 # refresh the visible table as results accumulate
                 self.q.put(("refresh_table", None))
             # Record this run as the baseline. Completed runs replace it;
             # cancelled runs MERGE their partial findings into it — so even a
             # part-way hunt unlocks (and improves) "New Wishlist Search".
-            to_save = _wl_record_run(
-                baseline, all_urls,
-                getattr(self, "_wishlist_hunt_cancel", False))
-            if to_save is not None:
-                _wl_save_seen(to_save)
+            # Batch hunts skip this entirely: they aren't wishlist sweeps, so
+            # they must not advance the wishlist's "only new" baseline.
+            if record_baseline:
+                to_save = _wl_record_run(
+                    baseline, all_urls,
+                    getattr(self, "_wishlist_hunt_cancel", False))
+                if to_save is not None:
+                    _wl_save_seen(to_save)
             self.q.put(("status", log(
-                f"Wishlist hunt done: {grand} "
+                f"{status_tag} hunt done: {grand} "
                 + ("new " if new_only else "")
                 + f"listing(s) across {total} lock(s).")))
         except Exception as ex:
-            self.q.put(("status", log(f"Wishlist hunt FAILED: {ex}")))
+            self.q.put(("status", log(f"{status_tag} hunt FAILED: {ex}")))
         finally:
-            # Restore to whatever the checkbox says NOW — not the value we
-            # captured at hunt start — so a toggle made DURING the hunt isn't
-            # silently reverted (which would leave later single searches
-            # filtering opposite to the visible checkbox).
-            try:
-                _LOCK_CONTEXT_FILTER = bool(self.lockonly_var.get())
-            except Exception:
-                _LOCK_CONTEXT_FILTER = prev_filter
             self._wishlist_hunt_running = False
             self.q.put(("wishlist_hunt_done", None))
 
@@ -9433,6 +10736,8 @@ class LockHunter(tk.Tk):
             self._refresh_table()
             if hasattr(self, "locks_tree"):
                 self._refresh_locks_table()
+            if hasattr(self, "coll_belts"):
+                self._refresh_collection_tab()
         except Exception as ex:
             errors.append(f"ui: {ex}")
 
@@ -9650,7 +10955,10 @@ class LockHunter(tk.Tk):
             comp_meta = [(comp, _origin_for_lock(comp),
                           "" if len(components) == 1 else f"[{comp}] ")
                          for comp in components]
-            phase_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+            # eBay markets + direct domains run concurrently here; give them
+            # enough workers to all overlap (I/O-bound, so extra threads just
+            # wait on the network). No result change — same requests, sooner.
+            phase_pool = concurrent.futures.ThreadPoolExecutor(max_workers=12)
             try:
                 ebay_futs = []      # (log label, tag, future) in submit order
                 for comp, comp_origin, tag in comp_meta:
@@ -9762,9 +11070,9 @@ class LockHunter(tk.Tk):
                     f"listing(s); {len(results)} live.")))
             kept = 0
             for it in results:
-                ship = str(it.get("shipping", "unknown")).lower()
-                if excl and ship == "no":
-                    continue
+                # Pickup/meetup-only rows (shipping='no') are STORED now — the
+                # "Exclude pickup / meetup-only" box hides them at display time
+                # (_refresh_table), so it's a reversible post-scan toggle.
                 try:
                     _insert_listing_row(conn, lock_name, it)
                     kept += 1
@@ -9832,6 +11140,7 @@ class LockHunter(tk.Tk):
                     self._show_scan_overlay(False)
                     self._refresh_table()
                     self._sync_hunt_wishlist_button()
+                    self._sync_batch_hunt_button()
                 elif kind == "sync_reset":
                     self.sync_btn.config(text="Update LPU catalog")
                 elif kind == "profile_reset":
@@ -9841,11 +11150,15 @@ class LockHunter(tk.Tk):
                     self._reload_lock_names()
                     if hasattr(self, "locks_tree"):
                         self._refresh_locks_table()
+                    if hasattr(self, "coll_belts"):
+                        self._refresh_collection_tab()
                 elif kind == "profile_done":
                     self.profile_btn.config(state="normal")
                     self._reload_lock_names()
                     if hasattr(self, "locks_tree"):
                         self._refresh_locks_table()
+                    if hasattr(self, "coll_belts"):
+                        self._refresh_collection_tab()
                 elif kind == "compare_results":
                     who, their_total, their_wish_total, rows = payload
                     self._compare_running = False
@@ -9964,6 +11277,10 @@ class LockHunter(tk.Tk):
                         self.locks_thumb_label.config(image=self._locks_thumb_ref,
                                                       text="")
                 elif kind == "usd_rates":
+                    # Record failure so _refresh_table's automatic
+                    # _ensure_rates_async() call won't re-trigger a fetch and
+                    # loop; user actions clear this via force=True.
+                    self._rates_failed = not bool(payload)
                     if payload:
                         self.status.set("Exchange rates loaded.")
                     else:
@@ -10014,11 +11331,46 @@ class LockHunter(tk.Tk):
         redraw. If rates can't be fetched, prices simply show without estimates."""
         if self.usd_var.get() and not _rates_cache["rates"]:
             self.status.set("Fetching exchange rates…")
-            def _w():
-                ok = bool(_usd_rates())
-                self.q.put(("usd_rates", ok))
-            threading.Thread(target=_w, daemon=True).start()
+            self._ensure_rates_async(force=True)
             return
+        self._refresh_table()
+
+    def _ensure_rates_async(self, force=False):
+        """Load USD exchange rates in the background if not already cached; when
+        they arrive the poll loop calls _refresh_table (via the 'usd_rates'
+        message). No-op if rates are present or a load is already in flight.
+        Used by the price filter and the deal-score feature, which both need a
+        USD-normalized price even when the 'Show USD estimate' box is off.
+
+        If a prior fetch FAILED, this does NOT auto-retry — otherwise, with a
+        price bound set and the network down, the fail→refresh→fetch→fail cycle
+        would thrash forever. User actions (typing a price, toggling USD) pass
+        force=True to clear that flag and try again."""
+        if force:
+            self._rates_failed = False
+        if _rates_cache.get("rates"):
+            return
+        if getattr(self, "_rates_loading", False):
+            return
+        if getattr(self, "_rates_failed", False):
+            return
+        self._rates_loading = True
+
+        def _w():
+            try:
+                ok = bool(_usd_rates())
+            except Exception:
+                ok = False
+            self._rates_loading = False
+            self.q.put(("usd_rates", ok))
+        threading.Thread(target=_w, daemon=True).start()
+
+    def _on_price_filter_changed(self):
+        """A price bound was typed: make sure rates are loading (they refresh
+        the table when they arrive) and refresh now so an already-loaded rate
+        table filters immediately. force=True so a previously-failed fetch is
+        retried on this explicit user action."""
+        self._ensure_rates_async(force=True)
         self._refresh_table()
 
     def _sort_by(self, col):
@@ -10034,21 +11386,33 @@ class LockHunter(tk.Tk):
             if c == self._sort_col:
                 mark = "  ▼" if self._sort_rev else "  ▲"
             self.tree.heading(c, text=base + mark)
+        # remember the choice across launches (state is written eagerly —
+        # there is no clean-close hook to save it in)
+        self.cfg["results_sort_col"] = self._sort_col
+        self.cfg["results_sort_rev"] = bool(self._sort_rev)
+        save_cfg(self.cfg)
         self._refresh_table()
 
     def _export_search_xlsx(self):
         """Export the current Search results to an Excel file with columns:
         Lock name, Rarity (stars), Title, Price, Price (USD), Site, Seller
         (the LPU Bazaar username, where the source knows it), and a clickable
-        hyperlink. Honors the same name filter that shapes the on-screen
-        table (condition/shipping toggles were removed in 4.7.5)."""
-        # Pull the same rows the results table shows (same WHERE clauses).
-        qy = ("SELECT lock_name,title,price,currency,site,url,seller"
+        hyperlink. Honors the SAME filters that shape the on-screen table — the
+        name filter plus the three display toggles (ships-to, exclude pickup,
+        lock results only) — so the export matches exactly what you see."""
+        # Pull the same rows the results table shows (same WHERE clauses as
+        # _refresh_table, so hidden rows are not exported).
+        qy = ("SELECT lock_name,title,price,currency,site,url,seller,shipping,shipto"
               " FROM listings WHERE 1=1")
         params = []
         f = self.filter_var.get().strip()
         if f:
             qy += " AND lock_name LIKE ?"; params.append(f"%{f}%")
+        if (getattr(self, "shipto_var", None) is not None
+                and self.shipto_var.get() and _SHIPTO["name"]):
+            qy += " AND NOT (site LIKE 'eBay%' AND COALESCE(shipto,'')='no')"
+        if getattr(self, "pickup_var", None) is not None and self.pickup_var.get():
+            qy += " AND LOWER(COALESCE(shipping,'')) <> 'no'"
         qy += (" ORDER BY (CASE WHEN site='LPU Lock Bazaar' THEN 0 ELSE 1 END),"
                " found_at DESC LIMIT 10000")
         try:
@@ -10067,6 +11431,39 @@ class LockHunter(tk.Tk):
         except sqlite3.Error as ex:
             messagebox.showerror("Export", f"Couldn't read results: {ex}")
             return
+        # "Lock results only" is a Python display filter, so apply it here too
+        # (rec: 0=lock_name, 1=title, 4=site) so the export matches the table —
+        # including the blank-key exclusion.
+        if getattr(self, "lockonly_var", None) is not None and self.lockonly_var.get():
+            rows = [
+                rec for rec in rows
+                if str(rec[4] or "") == "LPU Lock Bazaar"
+                or (not _is_key_blank(str(rec[1] or ""))
+                    and (_search_has_lock_word(str(rec[0] or ""))
+                         or _has_lock_context(str(rec[1] or ""))))
+            ]
+        # Price-range and site filters, same as the table (rec: 2=price,
+        # 3=currency, 4=site), so the export matches exactly what's on screen.
+        _pmin = _parse_price_bound(self.price_min_var.get()) \
+            if hasattr(self, "price_min_var") else None
+        _pmax = _parse_price_bound(self.price_max_var.get()) \
+            if hasattr(self, "price_max_var") else None
+        _crates = _rates_cache.get("rates")
+        if (_pmin is not None or _pmax is not None) and _crates:
+            def _keep_price(rec):
+                u = _usd_estimate(rec[2], rec[3], _crates)
+                if u is None:
+                    return True
+                if _pmin is not None and u < _pmin:
+                    return False
+                if _pmax is not None and u > _pmax:
+                    return False
+                return True
+            rows = [r for r in rows if _keep_price(r)]
+        _sel_site = (self.site_filter_var.get()
+                     if hasattr(self, "site_filter_var") else "All sites")
+        if _sel_site and _sel_site != "All sites":
+            rows = [r for r in rows if str(r[4] or "") == _sel_site]
         if not rows:
             messagebox.showinfo(
                 "Export", "No search results to export yet. Run a search first.")
@@ -10114,7 +11511,9 @@ class LockHunter(tk.Tk):
             link_font = Font(color="0563C1", underline="single")
 
             for rec in rows:
-                lock_name, title, price, currency, site, url, seller = rec
+                # rec now also carries shipping, shipto at [7], [8] (used only
+                # for the display-filter WHERE above) — take the first 7 here.
+                lock_name, title, price, currency, site, url, seller = rec[:7]
                 price_disp = " ".join(p for p in (str(price or "").strip(),
                                                   str(currency or "").strip())
                                       if p)
@@ -10176,6 +11575,7 @@ class LockHunter(tk.Tk):
             self.tree.delete(row)
         self._row_urls = {}
         self._row_images = {}
+        self._visible_titles = []   # raw titles on screen (for translation)
         qy = ("SELECT lock_name,title,price,currency,condition,site,"
               "location,shipping,found_at,url,image_url FROM listings WHERE 1=1")
         params = []
@@ -10192,6 +11592,11 @@ class LockHunter(tk.Tk):
             # not hidden — SQL NULL would otherwise make NOT(...) evaluate NULL
             # and drop the row.
             qy += " AND NOT (site LIKE 'eBay%' AND COALESCE(shipto,'')='no')"
+        # "Exclude pickup / meetup-only" display filter: when ticked, hide rows
+        # the source marked as local-pickup-only (shipping='no'). Unknown/ships
+        # rows stay. Reversible post-scan — the rows are stored either way.
+        if getattr(self, "pickup_var", None) is not None and self.pickup_var.get():
+            qy += " AND LOWER(COALESCE(shipping,'')) <> 'no'"
         # Default order: LPU Lock Bazaar first, then newest first.
         _RESULT_CEILING = 10000   # safety ceiling only; real result sets are
         #                           far smaller and show in full
@@ -10199,6 +11604,21 @@ class LockHunter(tk.Tk):
                f" found_at DESC LIMIT {_RESULT_CEILING}")
         conn = db()
         rows = list(conn.execute(qy, params))
+        # "Lock results only" display filter (reversible post-scan toggle):
+        # hide token-matching rows that don't look like actual lock/key
+        # listings — e.g. a "Sol" sunglasses when hunting the "Sol 2500" lock.
+        # Kept ALWAYS: LPU Lock Bazaar rows (curated locks) and rows whose
+        # search name itself already carries a lock word. rec[0]=lock_name,
+        # rec[1]=title, rec[5]=site. Mirrors the old scrape-time rule, just
+        # applied at display so the box can flip on/off without re-searching.
+        if getattr(self, "lockonly_var", None) is not None and self.lockonly_var.get():
+            rows = [
+                rec for rec in rows
+                if str(rec[5] or "") == "LPU Lock Bazaar"
+                or (not _is_key_blank(str(rec[1] or ""))
+                    and (_search_has_lock_word(str(rec[0] or ""))
+                         or _has_lock_context(str(rec[1] or ""))))
+            ]
         # Rarity stars per catalog lock NAME for the Rarity column. When the
         # same name exists at several belts, the rarest variant's count is
         # used. Custom (non-catalog) searches simply show no stars.
@@ -10216,10 +11636,78 @@ class LockHunter(tk.Tk):
                 " WHERE image_url IS NOT NULL AND image_url <> ''"):
             if nm:
                 self._lpu_img_by_name[_fold(nm)] = img
+
+        usd_on = bool(getattr(self, "usd_var", None) and self.usd_var.get())
+        # Cached rates are read for the PRICE FILTER and DEAL SCORE regardless
+        # of the "Show USD estimate" checkbox (they both need a USD-normalized
+        # price); the USD estimate is only DISPLAYED when the box is ticked.
+        cached_rates = _rates_cache.get("rates")
+
+        # --- Price-range filter (USD-normalized) ---
+        pmin = _parse_price_bound(self.price_min_var.get()) \
+            if hasattr(self, "price_min_var") else None
+        pmax = _parse_price_bound(self.price_max_var.get()) \
+            if hasattr(self, "price_max_var") else None
+        if pmin is not None or pmax is not None:
+            if not cached_rates:
+                # can't normalize yet — load rates, which refreshes when ready;
+                # keep every row for now (never hide on doubt)
+                self._ensure_rates_async()
+            else:
+                def _in_band(rec):
+                    u = _usd_estimate(rec[2], rec[3], cached_rates)
+                    if u is None:
+                        return True    # unparseable/unconvertible -> keep
+                    if pmin is not None and u < pmin:
+                        return False
+                    if pmax is not None and u > pmax:
+                        return False
+                    return True
+                rows = [r for r in rows if _in_band(r)]
+
+        # --- Site filter: fill the dropdown from sites present now, then
+        # narrow to the chosen one. Populated BEFORE applying so the list keeps
+        # every available site; reset to "All sites" if the selection vanished.
+        if hasattr(self, "site_filter_box"):
+            site_vals = sorted({str(r[5] or "") for r in rows if r[5]})
+            choices = ["All sites"] + site_vals
+            try:
+                if list(self.site_filter_box["values"]) != choices:
+                    self.site_filter_box["values"] = choices
+            except Exception:
+                pass
+            if self.site_filter_var.get() not in choices:
+                self.site_filter_var.set("All sites")
+            sel_site = self.site_filter_var.get()
+            if sel_site and sel_site != "All sites":
+                rows = [r for r in rows if str(r[5] or "") == sel_site]
+
+        # --- Deal score: median USD price per lock from listing_history.
+        # Chunk the IN() query to stay under SQLite's host-parameter limit.
+        median_by = {}
+        if cached_rates and rows:
+            names = list({str(r[0]) for r in rows if r[0]})
+            hist = {}
+            for cs in range(0, len(names), 400):
+                chunk = names[cs:cs + 400]
+                qm = ",".join("?" * len(chunk))
+                try:
+                    for ln, pr, curc in conn.execute(
+                            "SELECT lock_name, price, currency FROM "
+                            f"listing_history WHERE lock_name IN ({qm})",
+                            tuple(chunk)):
+                        u = _usd_estimate(pr, curc, cached_rates)
+                        if u is not None:
+                            hist.setdefault(_fold(ln or ""), []).append(u)
+                except sqlite3.Error:
+                    break
+            for fk_, vals in hist.items():
+                if len(vals) >= _DEAL_MIN_POINTS:
+                    median_by[fk_] = _median(vals)
         conn.close()
 
-        # Update the visible count. If we somehow hit the ceiling, say so
-        # honestly instead of silently truncating.
+        # Update the visible count (after ALL filters). If we somehow hit the
+        # ceiling, say so honestly instead of silently truncating.
         _n = len(rows)
         if hasattr(self, "results_count_var"):
             if _n >= _RESULT_CEILING:
@@ -10228,8 +11716,7 @@ class LockHunter(tk.Tk):
                 self.results_count_var.set(
                     f"{_n:,} result" + ("" if _n == 1 else "s"))
 
-        usd_on = bool(getattr(self, "usd_var", None) and self.usd_var.get())
-        rates = _rates_cache["rates"] if usd_on else None
+        rates = cached_rates if usd_on else None
 
         # Optional column sort (header click). Rows without a value for the
         # chosen column always sink to the bottom, whichever direction.
@@ -10266,11 +11753,29 @@ class LockHunter(tk.Tk):
                     price_disp += f"  (~${u:,.0f})"
             fk = _fold(rec[0] or "")
             rar = _rarity_stars(rarity_by_name[fk]) if fk in rarity_by_name else ""
-            vals = (rec[0], rec[1], price_disp, rec[5], rec[6], rar)
+            # Deal flag: this listing is at/under 80% of the lock's median.
+            is_deal = False
+            med = median_by.get(fk)
+            if med:
+                u2 = _usd_estimate(rec[2], rec[3], cached_rates)
+                if u2 is not None and u2 <= _DEAL_FACTOR * med:
+                    is_deal = True
+                    price_disp += "  ✓ deal"
+            # Title cell shows the English translation (when "Translate
+            # titles" is on and fetched) or a foreign-term gloss — display
+            # only; filters used the raw title above.
+            self._visible_titles.append(rec[1] or "")
+            vals = (rec[0], self._display_title(rec[1]), price_disp,
+                    rec[5], rec[6], rar)
             stripe = "even" if i % 2 else "odd"
-            iid = self.tree.insert("", "end", values=vals, tags=(stripe,))
+            tags = (stripe, "deal") if is_deal else (stripe,)
+            iid = self.tree.insert("", "end", values=vals, tags=tags)
             self._row_urls[iid] = rec[9]
             self._row_images[iid] = (rec[10] or "", rec[0] or "")
+        # fetch any missing translations in the background (no-op when the
+        # checkbox is off, a fetch is running, or a scan is still filling
+        # the table)
+        self._maybe_translate_async()
 
     def _thumb_url_for(self, iid):
         """Image URL for a result row: ONLY the listing's own captured photo.
