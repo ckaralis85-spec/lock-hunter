@@ -52,13 +52,21 @@ if not defined ST (
 
 echo Using signtool: !ST!
 echo Signing dist\LockHunter.exe ...
-"!ST!" sign /tr http://time.certum.pl /td sha256 /fd sha256 /a "dist\LockHunter.exe"
+REM  /i Certum restricts the auto-pick to certificates ISSUED BY Certum.
+REM  Without it, /a can silently grab a leftover self-signed or test
+REM  certificate on the machine - the file "signs" fine but then fails
+REM  verification with "terminated in a root certificate which is not
+REM  trusted" and gives you zero SmartScreen benefit.
+"!ST!" sign /tr http://time.certum.pl /td sha256 /fd sha256 /a /i Certum "dist\LockHunter.exe"
 if errorlevel 1 (
   echo.
   echo   SIGNING FAILED.
-  echo   Most common cause: SimplySign Desktop is not connected.
-  echo   Open its tray icon, "Connect to SimplySign", enter the
-  echo   6-digit code from the mobile app, then run this again.
+  echo   Two common causes:
+  echo     1. SimplySign Desktop is not connected. Open its tray icon,
+  echo        "Connect to SimplySign", enter the 6-digit code from the
+  echo        mobile app, then run this again.
+  echo     2. No Certum-issued certificate was found on this PC. Connect
+  echo        SimplySign first ^(it exposes the certificate^), then re-run.
   echo.
   pause & exit /b 1
 )
@@ -67,7 +75,29 @@ echo.
 echo Verifying the signature...
 "!ST!" verify /pa "dist\LockHunter.exe"
 if errorlevel 1 (
-  echo   Verification reported a problem - check the output above.
+  echo.
+  echo   Verification FAILED. Details of the certificate that signed it:
+  echo   ------------------------------------------------------------
+  "!ST!" verify /pa /v "dist\LockHunter.exe"
+  echo   ------------------------------------------------------------
+  echo.
+  echo   How to read this:
+  echo.
+  echo   * If "Issued by" above shows YOUR OWN name ^(issuer = subject^),
+  echo     a leftover self-signed certificate signed the file. Connect
+  echo     SimplySign and run this script again - the /i Certum filter
+  echo     now forces the real Certum certificate.
+  echo.
+  echo   * If it shows a Certum chain but still says "not trusted", this
+  echo     PC is just missing Certum's root/intermediate certificates
+  echo     locally. Download them from:
+  echo         https://www.certum.eu/en/cert_offer_ca_certificates/
+  echo     ^(Certum Trusted Network CA + the Code Signing intermediates^),
+  echo     double-click each .cer, Install Certificate, Local Machine,
+  echo     let Windows pick the store, then re-run this script.
+  echo     End users are NOT affected either way - Windows fetches
+  echo     trusted roots automatically on their machines.
+  echo.
 ) else (
   echo.
   echo   SUCCESS: dist\LockHunter.exe is signed and timestamped.

@@ -47,7 +47,11 @@ re-search**:
 - **Lock results only** — hides same-name non-lock listings (e.g. "Sol"
   sunglasses when you're hunting the "Sol 2500" lock) and "blank key / key
   blank / key-cutting" listings that sell a key *for* the lock rather than the
-  lock itself (multilingual; a lock sold *with* keys is kept). *On by default.*
+  lock itself (multilingual; a lock sold *with* keys is kept), and
+  **parts-only** listings — loose bottom/top pins, master wafers, springs and
+  pinning kits — which carry the lock's exact name but aren't locks. Pin
+  *counts* are untouched, so a "6-pin cylinder" and a lock sold with spare
+  pins both stay. *On by default.*
 - **Only eBay that ships to me** — set your country, and this hides eBay
   listings that won't ship there. *Off by default.*
 - **Exclude pickup / meetup-only** — hides local-pickup-only listings.
