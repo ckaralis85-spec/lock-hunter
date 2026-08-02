@@ -68,7 +68,7 @@ if not "%RC%"=="0" (
   echo.
   echo Done. Attach this file to a GitHub Release:
   echo   %OUTZIP%
-  echo (or just attach dist\LockHunter.exe directly).
+  echo ^(or just attach dist\LockHunter.exe directly^).
 )
 pause
 endlocal

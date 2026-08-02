@@ -100,6 +100,31 @@ same way:
 Replace the old file with the new one (or just keep the newest). Your settings
 and saved collection stay intact.
 
+## "Failed to remove temporary directory: …\Temp\_MEIxxxxxx"
+
+If you see this warning as Lock Hunter closes, nothing is broken and nothing is
+lost. It comes from the packaging layer, not from Lock Hunter: a single-file
+`.exe` unpacks itself into a `_MEIxxxxxx` folder in your Temp directory every
+time it runs and deletes that folder on exit, and the warning means something
+still had the folder open at that moment. Click **OK** and carry on.
+
+The causes inside Lock Hunter's control are fixed — it no longer sits in that
+folder while it runs, it doesn't hand the folder to browser windows it opens
+for you, and it clears out leftovers from earlier runs at startup. Antivirus
+software scanning the folder while Windows is deleting it can still trigger the
+warning occasionally.
+
+If it keeps happening and you'd rather it never did, build the **folder**
+version instead — it unpacks nothing at run time, so there is nothing to clean
+up, and it starts faster. Run:
+
+```
+"DEVELOPER ONLY - Build EXE.bat" onedir
+```
+
+That produces `dist\LockHunter\` instead of one file. Keep the whole folder
+together; `LockHunter.exe` inside it will not run on its own.
+
 ## Quick help
 
 - **I don't see LockHunter.exe.** Make sure you expanded the **Assets** section

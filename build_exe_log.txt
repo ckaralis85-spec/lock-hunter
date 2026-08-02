@@ -1,5 +1,5 @@
 Lock Hunter - DEVELOPER ONLY - Build EXE.bat 
-Started: Sun 08/02/2026 11:13:14.67 
+Started: Sun 08/02/2026 18:41:27.11 
 --- python version ---
 Python 3.14.6
 --- venv ---
@@ -76,13 +76,13 @@ Installing collected packages: pycparser, cffi, curl_cffi
 
 Successfully installed cffi-2.1.0 curl_cffi-0.16.0 pycparser-3.0
 --- pyinstaller ---
-103 INFO: PyInstaller: 6.21.0, contrib hooks: 2026.6
-103 INFO: Python: 3.14.6
-130 INFO: Platform: Windows-11-10.0.26200-SP0
-130 INFO: Python environment: C:\Users\ckara\Downloads\LockHunter-v4.7.1\.venv_build
-133 INFO: wrote C:\Users\ckara\Downloads\LockHunter-v4.7.1\LockHunter.spec
-135 INFO: Removing temporary files and cleaning cache in C:\Users\ckara\AppData\Local\pyinstaller
-518 INFO: Module search paths (PYTHONPATH):
+105 INFO: PyInstaller: 6.21.0, contrib hooks: 2026.6
+105 INFO: Python: 3.14.6
+133 INFO: Platform: Windows-11-10.0.26200-SP0
+133 INFO: Python environment: C:\Users\ckara\Downloads\LockHunter-v4.7.1\.venv_build
+137 INFO: wrote C:\Users\ckara\Downloads\LockHunter-v4.7.1\LockHunter.spec
+138 INFO: Removing temporary files and cleaning cache in C:\Users\ckara\AppData\Local\pyinstaller
+517 INFO: Module search paths (PYTHONPATH):
 ['C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Scripts\\pyinstaller.exe',
  'C:\\Python314\\python314.zip',
  'C:\\Python314\\DLLs',
@@ -91,95 +91,95 @@ Successfully installed cffi-2.1.0 curl_cffi-0.16.0 pycparser-3.0
  'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build',
  'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages',
  'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1']
-756 INFO: Appending 'datas' from .spec
-758 INFO: checking Analysis
-759 INFO: Building Analysis because Analysis-00.toc is non existent
-759 INFO: Looking for Python shared library...
-759 INFO: Using Python shared library: C:\Python314\python314.dll
-759 INFO: Running Analysis Analysis-00.toc
-759 INFO: Target bytecode optimization level: 0
-759 INFO: Initializing module dependency graph...
-759 INFO: Initializing module graph hook caches...
-769 INFO: Analyzing modules for base_library.zip ...
-1938 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-2328 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-2487 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-2574 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-2583 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-4650 INFO: Caching module dependency graph...
-4669 INFO: Analyzing C:\Users\ckara\Downloads\LockHunter-v4.7.1\lock_hunter.py
-5262 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-5296 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-5299 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-5305 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-5560 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-5707 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-5773 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-6037 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
-6038 INFO: TclTkInfo: initializing cached Tcl/Tk info...
-6489 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-6542 INFO: Processing standard module hook 'hook-urllib3.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-6614 INFO: Processing pre-safe-import-module hook 'hook-backports.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-6615 INFO: SetuptoolsInfo: initializing cached setuptools info...
-7002 INFO: Setuptools: 'backports' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.backports'!
-7008 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-7018 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-7045 INFO: Processing pre-safe-import-module hook 'hook-jaraco.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-7045 INFO: Setuptools: 'jaraco' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco'!
-7053 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-7054 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
-7145 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-7205 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-7366 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-7367 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-7727 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-7728 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
-8236 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-8237 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
-8582 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-8631 INFO: Processing standard module hook 'hook-charset_normalizer.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-8782 INFO: Processing standard module hook 'hook-PIL.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-8884 INFO: Processing standard module hook 'hook-PIL.Image.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-9205 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-9340 INFO: Processing standard module hook 'hook-PIL.ImageFilter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-10170 INFO: Processing standard module hook 'hook-openpyxl.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-11017 INFO: Analyzing hidden import 'curl_cffi.__main__'
-11046 INFO: Processing module hooks (post-graph stage)...
-11265 INFO: Processing standard module hook 'hook-PIL.SpiderImagePlugin.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-11875 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
-11883 INFO: Performing binary vs. data reclassification (971 entries)
-11960 INFO: Looking for ctypes DLLs
-12032 INFO: Analyzing run-time hooks ...
-12035 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-12037 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-12038 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-12040 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-12041 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-12056 INFO: Creating base_library.zip...
-12071 INFO: Looking for dynamic libraries
-12582 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\curl_cffi.libs']
-12582 INFO: Extra DLL search directories (PATH): []
-12815 INFO: Warnings written to C:\Users\ckara\Downloads\LockHunter-v4.7.1\build\LockHunter\warn-LockHunter.txt
-12851 INFO: Graph cross-reference written to C:\Users\ckara\Downloads\LockHunter-v4.7.1\build\LockHunter\xref-LockHunter.html
-12966 INFO: checking PYZ
-12966 INFO: Building PYZ because PYZ-00.toc is non existent
-12966 INFO: Building PYZ (ZlibArchive) C:\Users\ckara\Downloads\LockHunter-v4.7.1\build\LockHunter\PYZ-00.pyz
-13255 INFO: Building PYZ (ZlibArchive) C:\Users\ckara\Downloads\LockHunter-v4.7.1\build\LockHunter\PYZ-00.pyz completed successfully.
-13304 INFO: checking PKG
-13304 INFO: Building PKG because PKG-00.toc is non existent
-13304 INFO: Building PKG (CArchive) LockHunter.pkg
-15206 INFO: Building PKG (CArchive) LockHunter.pkg completed successfully.
-15225 INFO: Bootloader C:\Users\ckara\Downloads\LockHunter-v4.7.1\.venv_build\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
-15226 INFO: checking EXE
-15226 INFO: Building EXE because EXE-00.toc is non existent
-15226 INFO: Building EXE from EXE-00.toc
-15226 INFO: Copying bootloader EXE to C:\Users\ckara\Downloads\LockHunter-v4.7.1\dist\LockHunter.exe
-15276 INFO: Copying icon to EXE
-15279 INFO: Copying version information to EXE
-15297 INFO: Copying 0 resources to EXE
-15297 INFO: Embedding manifest in EXE
-15313 INFO: Appending PKG archive to EXE
-15327 INFO: Fixing EXE headers
-15489 INFO: Building EXE from EXE-00.toc completed successfully.
-15498 INFO: Build complete! The results are available in: C:\Users\ckara\Downloads\LockHunter-v4.7.1\dist
+741 INFO: Appending 'datas' from .spec
+744 INFO: checking Analysis
+744 INFO: Building Analysis because Analysis-00.toc is non existent
+744 INFO: Looking for Python shared library...
+744 INFO: Using Python shared library: C:\Python314\python314.dll
+744 INFO: Running Analysis Analysis-00.toc
+744 INFO: Target bytecode optimization level: 0
+744 INFO: Initializing module dependency graph...
+745 INFO: Initializing module graph hook caches...
+754 INFO: Analyzing modules for base_library.zip ...
+1641 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+1649 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+1877 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+3099 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+3169 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+4132 INFO: Caching module dependency graph...
+4150 INFO: Analyzing C:\Users\ckara\Downloads\LockHunter-v4.7.1\lock_hunter.py
+4779 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+4805 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+4809 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+4813 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+5064 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+5199 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+5262 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+5454 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+5455 INFO: TclTkInfo: initializing cached Tcl/Tk info...
+5847 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+5912 INFO: Processing standard module hook 'hook-urllib3.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+5985 INFO: Processing pre-safe-import-module hook 'hook-backports.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+5986 INFO: SetuptoolsInfo: initializing cached setuptools info...
+6366 INFO: Setuptools: 'backports' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.backports'!
+6372 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+6382 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+6408 INFO: Processing pre-safe-import-module hook 'hook-jaraco.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+6408 INFO: Setuptools: 'jaraco' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco'!
+6415 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+6416 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
+6507 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+6568 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+6725 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+6726 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+7023 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+7023 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
+7403 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+7403 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
+7700 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+7732 INFO: Processing standard module hook 'hook-charset_normalizer.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+7860 INFO: Processing standard module hook 'hook-PIL.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+7952 INFO: Processing standard module hook 'hook-PIL.Image.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+8256 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+8385 INFO: Processing standard module hook 'hook-PIL.ImageFilter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+9192 INFO: Processing standard module hook 'hook-openpyxl.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+9857 INFO: Analyzing hidden import 'curl_cffi.__main__'
+9885 INFO: Processing module hooks (post-graph stage)...
+10107 INFO: Processing standard module hook 'hook-PIL.SpiderImagePlugin.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+10702 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks'
+10711 INFO: Performing binary vs. data reclassification (971 entries)
+10786 INFO: Looking for ctypes DLLs
+10873 INFO: Analyzing run-time hooks ...
+10877 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+10879 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+10880 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+10881 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+10882 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+10898 INFO: Creating base_library.zip...
+10912 INFO: Looking for dynamic libraries
+11399 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\ckara\\Downloads\\LockHunter-v4.7.1\\.venv_build\\Lib\\site-packages\\curl_cffi.libs']
+11400 INFO: Extra DLL search directories (PATH): []
+11628 INFO: Warnings written to C:\Users\ckara\Downloads\LockHunter-v4.7.1\build\LockHunter\warn-LockHunter.txt
+11669 INFO: Graph cross-reference written to C:\Users\ckara\Downloads\LockHunter-v4.7.1\build\LockHunter\xref-LockHunter.html
+11758 INFO: checking PYZ
+11758 INFO: Building PYZ because PYZ-00.toc is non existent
+11758 INFO: Building PYZ (ZlibArchive) C:\Users\ckara\Downloads\LockHunter-v4.7.1\build\LockHunter\PYZ-00.pyz
+12039 INFO: Building PYZ (ZlibArchive) C:\Users\ckara\Downloads\LockHunter-v4.7.1\build\LockHunter\PYZ-00.pyz completed successfully.
+12109 INFO: checking PKG
+12109 INFO: Building PKG because PKG-00.toc is non existent
+12109 INFO: Building PKG (CArchive) LockHunter.pkg
+13988 INFO: Building PKG (CArchive) LockHunter.pkg completed successfully.
+14008 INFO: Bootloader C:\Users\ckara\Downloads\LockHunter-v4.7.1\.venv_build\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+14008 INFO: checking EXE
+14008 INFO: Building EXE because EXE-00.toc is non existent
+14008 INFO: Building EXE from EXE-00.toc
+14008 INFO: Copying bootloader EXE to C:\Users\ckara\Downloads\LockHunter-v4.7.1\dist\LockHunter.exe
+14056 INFO: Copying icon to EXE
+14070 INFO: Copying version information to EXE
+14084 INFO: Copying 0 resources to EXE
+14084 INFO: Embedding manifest in EXE
+14099 INFO: Appending PKG archive to EXE
+14137 INFO: Fixing EXE headers
+14280 INFO: Building EXE from EXE-00.toc completed successfully.
+14295 INFO: Build complete! The results are available in: C:\Users\ckara\Downloads\LockHunter-v4.7.1\dist
 RESULT: success - dist\LockHunter.exe

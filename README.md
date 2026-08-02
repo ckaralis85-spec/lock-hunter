@@ -88,6 +88,37 @@ common), all sortable. Switch between **All locks**, **Locks I own**, and **My
 wishlist**, filter by belt, and search by name. **Update profile** imports your
 Owned and Wishlist locks straight from your lpubelts.com profile.
 
+### Priority locks
+
+Right-click any lock on the Locks tab — or a Ctrl/Shift-picked group — and
+**Mark as priority** (the same menu removes them again). Priorities are
+independent of Owned and Wishlist: a lock can be any combination of the
+three. They show a ★ in the Locks table, and:
+
+- **Show: My priorities** filters the table to just them, so **Hunt these
+  locks** sweeps exactly your priority list in one run (unlike other views,
+  this one does not skip locks you already own — if you flagged it, it gets
+  hunted).
+- **In search results, priority locks are blue and pinned to the top** — so
+  after a long sweep the things you're actively chasing are the first rows
+  you see, whatever else the table is sorted by.
+
+**Chasing something that isn't in the LPU catalog?** Type it into the
+**"Not on LPU?"** box on the Locks tab and click **Add to priority**. It joins
+your priority list and gets hunted with everything else, in any language —
+Japanese, Cyrillic and accented names all work.
+
+Locks you add this way live entirely outside the catalog: they show up **only**
+under *Show: My priorities*, never in All locks, Locks I own, My wishlist or the
+Search tab's lock list. They carry **no belt** — not even Unranked — and are
+left out of every collection number: the belt bars, the "% of the catalog
+owned" line, the catalog total, and the Owned / Wishlist counters in the corner
+all ignore them completely. Taking one off the priority list deletes it, since
+that's the only thing it was there for. Type a name that *is* in the catalog and
+Lock Hunter quietly prioritises the real lock instead of making a lookalike —
+and if LPU adds your lock later, the next catalog update promotes your entry to
+the real thing automatically.
+
 ### Hunt your wishlist — or any set of locks
 
 Three buttons on the Locks tab run the free search (eBay + all marketplaces +
@@ -96,14 +127,21 @@ Bazaar, no API credits) across a whole list of locks in one run:
 - **Search for Wishlist Locks** — every wishlist lock in one run.
 - **Only new searches** — the same hunt, but shows only listings that are new
   since your last wishlist search (greyed out until a first run sets a baseline).
-- **Hunt these locks** — a batch hunt of *any* set: select rows with
-  Ctrl/Shift-click to hunt exactly those, or select nothing to hunt everything
+- **Hunt these locks** — a batch hunt of *any* set: pick rows with
+  Ctrl/Shift-click to hunt exactly those, or pick nothing to hunt everything
   currently shown by the Show/Belt/Find filters. "Every Purple I don't own" is
   just Belt: Purple + this button — locks you already own are skipped
-  automatically (unless you're in the "Locks I own" view, where hunting your
-  own locks is clearly the point). Also available from the right-click menu
-  when several rows are selected. Batch hunts never disturb the wishlist's
-  "only new" baseline.
+  automatically (unless you're in the "Locks I own" or "My priorities" view,
+  where hunting your own locks is clearly the point). Also available from the
+  right-click menu when several rows are picked. Batch hunts never disturb the
+  wishlist's "only new" baseline.
+
+  **The button always states its scope** — it reads *Hunt all 43 shown* when
+  nothing is picked and *Hunt 3 picked* when rows are, and the count is the
+  real number of locks it will search (already-owned ones excluded). A stray
+  click can't quietly shrink a whole-list hunt: **Clear picks** (or Esc in the
+  list) unpicks everything, and the confirmation names the picked locks and
+  tells you how many rows it is about to skip.
 
 ### Collection dashboard (Collection tab)
 

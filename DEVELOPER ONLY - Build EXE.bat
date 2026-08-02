@@ -119,7 +119,22 @@ REM antivirus / Safe-Browsing false-positive trigger.
 python lock_hunter.py --write-version-file "version_info.txt" >nul 2>&1
 set "VER_OPT="
 if exist "version_info.txt" set VER_OPT=--version-file "version_info.txt"
-pyinstaller --onefile --windowed --name LockHunter ^
+REM  ONEFILE (default) vs ONEDIR.
+REM  --onefile ships a single .exe, but it has to unpack itself into
+REM  %TEMP%\_MEIxxxxxx on every launch and delete that folder on exit. If
+REM  anything still holds the folder open - antivirus mid-scan, a browser the
+REM  app launched, a slow network drive - Windows shows
+REM      Failed to remove temporary directory: C:\...\Temp\_MEIxxxxxx
+REM  That warning is the bootloader's, not Lock Hunter's, and no code change
+REM  can suppress it. --onedir removes the cause entirely: nothing is unpacked
+REM  at run time, so there is nothing to clean up (and it starts faster).
+REM  The trade-off is that you ship a FOLDER, not one file.
+REM  Run this script with the word onedir to build that way:
+REM      "DEVELOPER ONLY - Build EXE.bat" onedir
+set "PKG_OPT=--onefile"
+if /I "%~1"=="onedir" set "PKG_OPT=--onedir"
+if /I "%~1"=="onedir" echo Building a ONEDIR (folder) build - no temp unpacking.
+pyinstaller %PKG_OPT% --windowed --name LockHunter ^
   --clean --noupx ^
   %VER_OPT% ^
   %ICON_OPT% ^
@@ -134,6 +149,12 @@ if exist "_built_icon.ico" del /f /q "_built_icon.ico"
 if exist "version_info.txt" del /f /q "version_info.txt"
 
 if not "%PYI_RC%"=="0" goto :build_failed
+REM  NOTE: this MUST be a goto, not an "if ( ... )" block. Inside a
+REM  parenthesised block cmd.exe treats the first unescaped ")" - even one
+REM  inside an echo - as the end of the block, so the rest of the block runs
+REM  unconditionally. That is exactly what broke the onefile build: it printed
+REM  the folder-build message and exited before making the Desktop shortcut.
+if /I "%~1"=="onedir" goto :onedir_success
 if not exist "dist\LockHunter.exe" goto :build_failed
 
 echo.
@@ -185,6 +206,27 @@ powershell -NoProfile -Command "ie4uinit.exe -show" >nul 2>&1
 if exist "%LNK_PATH%" echo   Desktop shortcut refreshed - new icon, points at this build.
 
 REM open the dist folder so the exe is right there
+start "" "%~dp0dist"
+pause
+exit /b 0
+
+
+REM --------------------------------------------------- onedir build finished
+:onedir_success
+if not exist "dist\LockHunter\LockHunter.exe" goto :build_failed
+echo.
+echo ============================================================
+echo    SUCCESS - built the FOLDER build in  dist\LockHunter
+echo ============================================================
+echo.
+echo   This build unpacks nothing at run time, so it never shows
+echo   the "Failed to remove temporary directory" warning and it
+echo   starts faster.
+echo.
+echo   Ship the WHOLE  dist\LockHunter  folder, zipped.
+echo   LockHunter.exe on its own will NOT run.
+echo.
+>>"%LOG%" echo RESULT: success - onedir build in dist\LockHunter
 start "" "%~dp0dist"
 pause
 exit /b 0

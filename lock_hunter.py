@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "5.1.1"
+VERSION = "5.1.2"
 
 
 
@@ -50,6 +50,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import sqlite3
 import sys
 import threading
@@ -116,6 +117,7 @@ if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "--extract-ic
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from tkinter import font as tkfont
 
 try:
     import requests
@@ -204,6 +206,94 @@ def bump_version(v):
             minor = 1
             major += 1
     return f"{major}.{minor}.{patch}"
+
+def _leave_bundle_dir():
+    """Step out of the PyInstaller one-file unpack directory.
+
+    A --onefile exe extracts itself to %TEMP%\\_MEIxxxxxx and the child process
+    runs with that as its working directory. Windows will not delete a
+    directory that any process is sitting in, or that any process it launched
+    inherited — and Lock Hunter launches the browser (a listing, an LPU page,
+    the Bazaar) and the mail client. Those outlive the app, so on exit the
+    bootloader cannot clean up and shows
+
+        Failed to remove temporary directory: C:\\...\\Temp\\_MEIxxxxxx
+
+    Moving out of that folder before anything else runs is the fix. Only ever
+    moves when the working directory really is inside the bundle, so running
+    from source is untouched."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    try:
+        here = os.path.abspath(os.getcwd())
+        bundle = os.path.abspath(meipass)
+        if here == bundle or here.startswith(bundle + os.sep):
+            safe = os.path.expanduser("~")
+            if not os.path.isdir(safe):
+                safe = os.path.abspath(os.sep)
+            os.chdir(safe)
+    except Exception:
+        pass
+
+
+def _sweep_stale_bundle_dirs(keep_days=1):
+    """Delete _MEIxxxxxx folders left behind by earlier runs.
+
+    Every failed cleanup leaves a full copy of the app (tens of MB) in %TEMP%.
+    Folders still in use simply refuse to delete, which is exactly the
+    behaviour we want, so this is safe to run unconditionally. Never touches
+    this run's own folder."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return 0
+    removed = 0
+    try:
+        parent = os.path.dirname(os.path.abspath(meipass))
+        mine = os.path.abspath(meipass)
+        cutoff = time.time() - keep_days * 86400
+        for name in os.listdir(parent):
+            if not name.startswith("_MEI"):
+                continue
+            path = os.path.join(parent, name)
+            if os.path.abspath(path) == mine or not os.path.isdir(path):
+                continue
+            try:
+                if os.path.getmtime(path) > cutoff:
+                    continue            # could be another copy running now
+                shutil.rmtree(path, ignore_errors=True)
+                if not os.path.exists(path):
+                    removed += 1
+            except OSError:
+                pass                    # in use — leave it alone
+    except Exception:
+        pass
+    if removed:
+        try:
+            log(f"Cleaned up {removed} leftover temporary folder(s) from "
+                f"earlier runs.")
+        except Exception:
+            pass
+    return removed
+
+
+def open_url(url):
+    """Open a link WITHOUT handing the browser our working directory.
+
+    Belt and braces for _leave_bundle_dir: a launched browser inherits the
+    launcher's current directory and holds it open for as long as it runs, so
+    never launch one from inside the one-file unpack folder."""
+    try:
+        _leave_bundle_dir()
+    except Exception:
+        pass
+    try:
+        webbrowser.open(url)
+        return True
+    except Exception as e:
+        log(f"Could not open {url}: {e}")
+        return False
+
 
 def resource_path(*parts):
     """Path to a bundled resource. Tries several locations so it works whether
@@ -481,8 +571,12 @@ def _split_catalog_names(name):
     parts = [seg.strip() for seg in rough if seg.strip()]
     cleaned = []
     for p in parts:
-        if re.fullmatch(r"\d+", p) and cleaned:
-            # numeric fragment = a size (e.g. the '30' in '30/30'); reattach
+        # A fragment that STARTS with a bare number is a size, not a lock
+        # name: "ABUS 74/40 LOTO" is one lock, and splitting it produced the
+        # nonsense query "40 LOTO" which was then fired at all ~46 sites and
+        # filed whatever it found under the parent lock. Real component names
+        # always start with a brand/model word.
+        if cleaned and re.match(r"^\d+(\s|$)", p):
             cleaned[-1] = cleaned[-1] + "/" + p
         else:
             cleaned.append(p)
@@ -792,6 +886,57 @@ def _parse_ebay_search_loose(html):
             break
     return out
 
+_EBAY_ITM_RE = re.compile(r"^https?://[^/]*\bebay\.[a-z.]+/itm/(?:[^/?]+/)?(\d+)",
+                          re.I)
+
+
+def _canon_ebay_url(url):
+    """One canonical URL per eBay item id.
+
+    The Browse API returns the marketplace host (www.ebay.de/itm/335284991123)
+    while the page scrape always writes www.ebay.com — so the SAME listing was
+    stored twice whenever API credentials were set, and counted twice in the
+    price history that drives the deal median. `listings.url` is UNIQUE, so
+    agreeing on one form is all it takes."""
+    m = _EBAY_ITM_RE.match(str(url or ""))
+    if m:
+        return f"https://www.ebay.com/itm/{m.group(1)}"
+    return str(url or "").split("?")[0]
+
+
+_TRACKING_PARAMS = re.compile(
+    r"^(utm_.*|gclid|fbclid|msclkid|srsltid|ref|referrer|source|src|from|"
+    r"campaign|sort|order|page|pos|position|_trksid|_trkparms|hash|epid|"
+    r"var|mkevt|mkcid|mkrid|campid|customid|toolid|spm|scm|pvid|impression|"
+    r"tracking|trk|share|sharer|utm|si|s_kwcid)$", re.I)
+
+
+def _canon_listing_url(url):
+    """One stable URL per listing, so `listings.url` (UNIQUE) really does
+    dedupe. Two shapes broke it: eBay's API and page scrape disagreed on the
+    host, and sites whose listing id lives in the query string (Finn's
+    ?finnkode=, Taobao's ?id=) came back with different tracking parameters
+    on every run, so the same lock was stored — and price-histor-counted —
+    again and again. Tracking junk is dropped; real parameters are kept and
+    ordered, so the link still opens the right page."""
+    u = str(url or "").strip()
+    if not u:
+        return u
+    if re.search(r"\bebay\.[a-z.]+/itm/", u, re.I):
+        return _canon_ebay_url(u)
+    base, _, query = u.partition("?")
+    if not query:
+        return base
+    keep = []
+    for part in query.split("&"):
+        if not part:
+            continue
+        name = part.split("=", 1)[0]
+        if not _TRACKING_PARAMS.match(name):
+            keep.append(part)
+    return base + ("?" + "&".join(sorted(keep)) if keep else "")
+
+
 def _parse_ebay_search_strict(html):
     """Classic 's-item' card markup: per-item chunks so fields can't bleed
     across listings; skips the 'Shop on eBay' placeholder card."""
@@ -840,6 +985,17 @@ def _fold(s):
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = "".join(c if ord(c) < 128 else " " for c in s)
     return re.sub(r"\s+", " ", s).strip().lower()
+
+def _pkey(s):
+    """Identity key for a lock NAME, safe for every script.
+
+    _fold() exists for fuzzy MATCHING of listing titles, so it flattens
+    everything to ASCII — which turns '南京錠' and 'МЕДЕКО' into the empty
+    string and collides 'アブロイ 341' with 'Аблой 341'. That is fine for
+    title matching and useless as an identity, so names are keyed on a plain
+    case-folded, whitespace-collapsed form instead."""
+    return " ".join(str(s or "").casefold().split())
+
 
 def _log_diag(msg):
     """Persist a scrape diagnostic to the saved log (lockhunter.log) so a
@@ -1097,7 +1253,7 @@ def _parse_ebay_api_items(payload, marketplace):
             if ti:
                 img = (ti[0] or {}).get("imageUrl") or ""
         if title and url:
-            out.append((title, price, url.split("?")[0], cond, loc, img))
+            out.append((title, price, _canon_ebay_url(url), cond, loc, img))
     return out
 
 def _ebay_api_params(lock_name, limit):
@@ -1328,20 +1484,30 @@ def _mp_price_near(text, idx, window=240):
     Ft, CHF, ₪, ₽, ₺/TL, лв, din, lei, ¥/円 … — in both prefix ("CHF 45.–")
     and suffix ("12 000 Ft", "249 kr") positions, plus the Swedish "249:-"
     shorthand. Space/nbsp thousands are handled."""
-    seg = text[idx:idx + window]
-    seg = (seg.replace("&nbsp;", " ").replace("&#160;", " ")
+    return _mp_price_scan(text[idx:idx + window])
+
+
+def _mp_price_scan(seg, last=False, with_gap=False):
+    """The price-token regexes, run over one already-sliced segment. `last`
+    picks the final match instead of the first — used when scanning BACKWARDS
+    from a title anchor, where the nearest price is the one just before it.
+    With `with_gap`, returns (price, characters between the price and the end
+    of the segment (last=True) or its start (last=False))."""
+    seg = (str(seg or "").replace("&nbsp;", " ").replace("&#160;", " ")
               .replace("\u00a0", " ").replace("\u202f", " ")
               .replace("\xa0", " "))
-    m = re.search(r"(?<![A-Za-z])((?:" + _MP_CUR_PRE + r")\s?"
-                  + _MP_AMT + r")", seg)
-    if not m:
-        m = re.search(r"(" + _MP_AMT + r"\s?(?:" + _MP_CUR_SUF + r"))"
-                      r"(?![A-Za-z])", seg)
-    if not m:
-        m = re.search(r"(\d[\d ]{0,9}\d\s?:[-–—]|\d\s?:[-–—])", seg)
-    if not m:
-        return ""
-    return re.sub(r"\s+", " ", m.group(1)).strip()
+    pats = (r"(?<![A-Za-z])((?:" + _MP_CUR_PRE + r")\s?" + _MP_AMT + r")",
+            r"(" + _MP_AMT + r"\s?(?:" + _MP_CUR_SUF + r"))(?![A-Za-z])",
+            r"(\d[\d ]{0,9}\d\s?:[-–—]|\d\s?:[-–—])")
+    for pat in pats:
+        found = list(re.finditer(pat, seg))
+        if found:
+            m = found[-1] if last else found[0]
+            txt = re.sub(r"\s+", " ", m.group(1)).strip()
+            if with_gap:
+                return txt, (len(seg) - m.end() if last else m.start())
+            return txt
+    return ("", 10 ** 9) if with_gap else ""
 
 def _find_listing_link_pos(html, url):
     """Position of a listing's REAL anchor in the page markup. The same path
@@ -1603,8 +1769,17 @@ def _lock_tokens(name):
     prepared = _norm_sizes(_canon_aliases(_fold(name)))
     keep_singles = {t.lower() for t in re.split(r"[^0-9A-Za-z]+", str(name or ""))
                     if len(t) == 1 and (t.isdigit() or t.isupper())}
-    return [t for t in re.split(r"[^a-z0-9]+", prepared)
+    toks = [t for t in re.split(r"[^a-z0-9]+", prepared)
             if len(t) > 1 or t in keep_singles]
+    # _fold() maps every non-ASCII character to a space, so the Japanese,
+    # Cyrillic or Chinese part of a name vanishes here — and for a name with
+    # NO Latin part the token list came back empty, which switches the "does
+    # this title match?" guard off entirely in every probe (the sweep then
+    # accepted whatever the site returned: jeans, games, other people's
+    # padlocks). Carry the non-Latin words through as tokens of their own.
+    toks += [t for t in re.split(r"[^\w]+", str(name or "").casefold())
+             if len(t) > 1 and not t.isascii()]
+    return toks
 
 
 def _match_tokens(title, tokens):
@@ -1619,7 +1794,16 @@ def _match_tokens(title, tokens):
         return False
     tl_raw = _canon_aliases(_fold(title))
     tl = _norm_sizes(tl_raw)
+    # _fold() erases non-Latin scripts, so a Japanese/Cyrillic token can only
+    # be found in the title as the user actually typed it.
+    tl_native = None
     for tok in tokens:
+        if not tok.isascii():
+            if tl_native is None:
+                tl_native = str(title).casefold()
+            if tok in tl_native:
+                continue
+            return False
         tk = _norm_sizes(_canon_aliases(tok))
         if len(tok) <= 2:
             # check BOTH the size-glued and the raw title: gluing can fuse a
@@ -1666,6 +1850,11 @@ def _only_in_part_number(tok, tl, tokens=()):
             return False            # an ordinary occurrence — not a part no.
         if any(tail.startswith(o) for o in others):
             return False            # compact spelling of this very lock
+        # A SHORT numeric tail is a model number, not a part number:
+        # "RUKO600", "ABUS85" are how sellers write the lock. Real part
+        # numbers that caused this rule ("FUG500010", "MTL104510") are long.
+        if len(tail) <= 4 and tail.isdigit():
+            return False
         found = True
     return found
 
@@ -1842,11 +2031,14 @@ _LOCK_GENERIC_WORDS = {"lock", "locks", "locking", "key", "keys", "keyed"}
 # Swedish/Norwegian "lås" folds to "las" — which is also the Spanish article
 # ("Dejo LAS medidas") and half of "LAS Vegas". On its own it means nothing,
 # so it only counts when the title carries some other Nordic marker.
+# NB: no "for", "med", "av", "st" or "vintage" here — each is an ordinary
+# English word, and together they made "LAS VEGAS neon sign for man cave" and
+# "Las Palmas travel poster, av 1970" read as Swedish "lås" listings.
 _NORDIC_MARKERS = frozenset((
-    "med", "och", "utan", "till", "for", "pa", "av", "nyckel", "nycklar",
+    "och", "utan", "till", "nyckel", "nycklar",
     "nokkel", "nokler", "gammalt", "gammal", "gamla", "gammel", "aldre",
     "saljes", "salges", "begagnad", "brukt", "brugt", "massing", "gjutjarn",
-    "stort", "litet", "antikt", "gott", "skick", "vintage", "st",
+    "stort", "litet", "antikt", "skick", "lasbart", "hanglas", "cylinderlas",
 ))
 
 
@@ -1866,16 +2058,18 @@ _WRONG_CATEGORY_TERMS = (
     "slot rail", "barrel nut", "qd swivel", "airsoft",
     "optic mount", "t nut",
     # vehicle parts, keys and remotes
-    "dichtungssatz", "land rover", "lock actuator", "actuator",
+    "dichtungssatz", "land rover", "lock actuator", "door lock actuator",
     "tailgate", "liftgate", "funkschlussel", "funk schlussel",
-    "ignition barrel", "keyless remote", "keyless entry",     "remote fob", "fob entry", "key remote", "remote key",
+    "ignition barrel", "keyless remote",
+    "remote fob", "fob entry", "key remote",
     "centralna brava",
     "wheel cylinder", "slave cylinder", "brake cylinder",
     "hovedcylinder", "pneumatik cylinder", "pneumatic cylinder",
     "hydraulic cylinder",     # media, cards, packaging
     "dvd case", "cd case", "blu ray", "trading card", "weiss schwarz",
     "booster box", "booster pack", "treble clef",
-    "45 rpm", "33 rpm", "vinyl", "hinged mint", "key value", "scv",
+    "45 rpm", "33 rpm", "vinyl record", "vinyl lp", "hinged mint",
+    "key value", "scv",
     "postkarte",
     # fasteners
     "flange nut", "stover nut", "nyloc",
@@ -1887,6 +2081,22 @@ _WRONG_CATEGORY_TERMS = (
     # door-closer / appliance hardware
     "turschliesser", "food processor",
     "kitchenaid",
+    # Unmistakably-not-a-lock product nouns. A catalogue name like "Sol 2500"
+    # or "Viro Panther" collides with ordinary consumer goods, and those
+    # titles carry no lock word to reject them by — so name the goods.
+    # Everything here is a word a genuine lock listing essentially never uses.
+    "necklace", "pendant", "jewelry", "jewellery", "earrings", "bracelet",
+    "charm bracelet", "keepsake",
+    "sunglasses", "sunglass", "eyeglasses", "spectacles",
+    "perfume", "cologne", "eau de toilette", "mascara", "lipstick",
+    "shampoo", "conditioner",
+    "jersey", "sneakers", "trainers", "hoodie", "t shirt", "tee shirt",
+    "leggings", "swimsuit", "handbag", "wallet purse",
+    "poster print", "wall art", "canvas print",
+    "headphones", "earbuds", "smartphone", "tablet pc", "laptop",
+    "power inverter", "inverter", "power bank",
+    "guitar", "ukulele", "drone", "jigsaw puzzle", "lego", "plush toy",
+    "action figure", "bike helmet", "bicycle helmet", "cycling helmet",
 )
 
 # Compound words that can only be one thing, so they're matched as substrings
@@ -1944,10 +2154,12 @@ def _has_lock_context(title):
     # title has no lock evidence left in ANY language, while a real "padlock
     # with keyring" still passes via its own words.
     tl = tl.replace("-", " ")
+    had_accessory = False
     for p in _KEY_ACCESSORY_PHRASES:
         pp = p.replace("-", " ")
         if pp in tl:
             tl = tl.replace(pp, " ")
+            had_accessory = True
     tls = " " + re.sub(r"[^a-z0-9]+", " ", tl) + " "
     if any(" " + p + " " in tls for p in _SAFE_LOCK_PHRASES):
         return True
@@ -1984,6 +2196,11 @@ def _has_lock_context(title):
             if tok.startswith(p):
                 return True
     if generic_hit:
+        # A title that carried key-ACCESSORY vocabulary and whose only
+        # remaining evidence is a generic "key"/"keys" is an accessory: "key
+        # pouch for car keys" left "for car keys" behind and passed.
+        if had_accessory:
+            return False
         return not any(p in tl for p in _LOCK_JUNK_PHRASES)
     return False
 
@@ -2427,8 +2644,13 @@ def _sanitize_title(title):
     fragments (see _strip_css_junk) — a title that is ONLY css comes back
     empty, so the probe drops the row."""
     t = (title or "").strip()
+    # Only treat this as an embedded payload if it really looks like one: a
+    # braces/brackets wrapper, or a quoted KEY immediately followed by a
+    # colon. The old test fired on any quote-colon-quote sequence, so an
+    # ordinary title like 'Vintage "Yale" : "Rare" brass padlock' was
+    # silently discarded.
     looks_json = (t.startswith("{") or t.startswith("[")
-                  or ('"' in t and re.search(r'"\s*:\s*"', t)))
+                  or re.search(r'"[A-Za-z_][A-Za-z0-9_]*":["\[{]', t))
     if looks_json and ".css-" not in t:
         jt = re.search(r'"title"\s*:\s*"([^"]{2,})"', t)
         return jt.group(1).strip() if jt else ""
@@ -3273,7 +3495,13 @@ def _anchor_scan(html, href_re, base, note_price_window=400, keep_query=False):
     there). Pass keep_query=True for sites whose listing ID lives in the query
     (e.g. Finn's ?finnkode=, Taobao's ?id=) so links stay clickable."""
     out, seen = [], set()
-    for m in re.finditer(href_re, html, re.S | re.I):
+    # Card fences. Scanning blindly forward from a title anchor reads the NEXT
+    # listing's price whenever the markup puts the price above the title
+    # (image → price → title is a very common card order), so every row got
+    # its neighbour's price. Bound the forward scan at the next anchor, and
+    # when nothing is found there, look BACKWARDS within this card instead.
+    marks = list(re.finditer(href_re, html, re.S | re.I))
+    for i, m in enumerate(marks):
         href = m.group(1)
         key = m.group(2) if m.lastindex and m.lastindex >= 2 else href
         if key in seen:
@@ -3289,8 +3517,18 @@ def _anchor_scan(html, href_re, base, note_price_window=400, keep_query=False):
         url = href if href.startswith("http") else base + href
         if not keep_query:
             url = url.split("?")[0]
-        out.append((title, _mp_price_near(html, m.end(), note_price_window),
-                    url))
+        nxt = marks[i + 1].start() if i + 1 < len(marks) else len(html)
+        hi = min(m.end() + note_price_window, max(m.end(), nxt))
+        fwd, fwd_gap = _mp_price_scan(html[m.end():hi], with_gap=True)
+        lo = max(marks[i - 1].end() if i else 0,
+                 m.start() - note_price_window)
+        back, back_gap = _mp_price_scan(html[lo:m.start()], last=True,
+                                        with_gap=True)
+        # whichever price sits CLOSER to this title wins: the one after it in
+        # an "image → title → price" card, the one before it in the equally
+        # common "image → price → title" card
+        price = back if back and back_gap < fwd_gap else fwd
+        out.append((title, price, url))
         if len(out) >= 50:
             break
     return out
@@ -4249,7 +4487,11 @@ def _usd_estimate(price, currency, rates):
 # (or as unknown for "kr"), so an AU$45 Gumtree lock was valued as US$45 —
 # roughly 50% too high — which then skewed the USD column, the price-range
 # filter and the deal-score median (false "✓ deal" flags).
-_AMBIGUOUS_CUR_SYMBOLS = ("$", "kr")
+# "¥" and the fullwidth "￥" are shared by the Japanese yen and the Chinese
+# yuan — 20x apart. Reading a Taobao ¥1200 lock as ¥1200 JPY valued it at $8
+# instead of $167, which guaranteed a false "✓ deal" and let it slip through
+# price bands. Treated as ambiguous so the marketplace's own currency decides.
+_AMBIGUOUS_CUR_SYMBOLS = ("$", "kr", "\u00a5", "\uffe5")
 
 # The currency each marketplace actually prices in. Only consulted when the
 # listing's own text is ambiguous (above) — an explicit ISO code or a
@@ -4440,6 +4682,35 @@ def init_db():
             image_url TEXT, page_url TEXT, source TEXT, belt_full TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS my_collection(
             lock_id TEXT PRIMARY KEY, status TEXT)""")
+        # Locks you're actively chasing. Deliberately a SEPARATE table rather
+        # than another my_collection status, because priority is orthogonal —
+        # a lock can be owned, wishlisted, neither, and still be a priority.
+        conn.execute("""CREATE TABLE IF NOT EXISTS priority_locks(
+            lock_id TEXT PRIMARY KEY, added_at TEXT)""")
+        # Locks that aren't in the LPU catalog at all, typed in by hand on the
+        # Locks tab. They exist ONLY as priorities — deliberately kept out of
+        # the `locks` table so they can never skew "% of the catalog owned",
+        # the belt counts, or the Search tab's lock list. Keyed on the FOLDED
+        # name so "abloy 341" and "Abloy 341" are the same entry.
+        conn.execute("""CREATE TABLE IF NOT EXISTS custom_locks(
+            key TEXT PRIMARY KEY, name TEXT, added_at TEXT)""")
+        # Every "how often have I seen this lock, and for how much?" query
+        # filters listing_history by lock_name, and the Collection tab runs
+        # one per wishlist lock — 250 full scans of ~25k rows on the UI
+        # thread, ~410ms. With this index the whole pass is ~8ms.
+        for ddl in (
+                "CREATE INDEX IF NOT EXISTS ix_hist_lock"
+                " ON listing_history(lock_name)",
+                "CREATE INDEX IF NOT EXISTS ix_listings_lock"
+                " ON listings(lock_name)",
+                "CREATE INDEX IF NOT EXISTS ix_coll_status"
+                " ON my_collection(status)",
+                "CREATE INDEX IF NOT EXISTS ix_locks_name"
+                " ON locks(name)"):
+            try:
+                conn.execute(ddl)
+            except sqlite3.Error:
+                pass
         # --- migration: older versions declared locks.name UNIQUE, which breaks
         # the LPU sync (the catalog legitimately repeats a name across belts).
         # If we detect that old schema, rebuild the table without the constraint.
@@ -4447,22 +4718,38 @@ def init_db():
             ddl = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='locks'"
             ).fetchone()
-            if ddl and "UNIQUE" in ddl[0].upper():
-                conn.executescript("""
+            # Match the constraint, not the word: a future column literally
+            # named e.g. "unique_key" must not re-arm this rebuild.
+            if ddl and re.search(r"\bUNIQUE\b", ddl[0] or "", re.I) \
+                    and "PRIMARY KEY" in (ddl[0] or "").upper() \
+                    and re.search(r"name\s+TEXT\s+UNIQUE", ddl[0] or "", re.I):
+                have = [r[1] for r in conn.execute("PRAGMA table_info(locks)")]
+                # Carry over EVERY column the old table had. Hard-coding six
+                # of them silently reset belt_full (Black sub-tiers) and
+                # owner_count (rarity stars) to NULL for the whole catalog.
+                carry = [c for c in ("id", "name", "belt", "image_url",
+                                     "page_url", "source", "belt_full",
+                                     "owner_count") if c in have]
+                types = {"owner_count": "INTEGER"}
+                defs = ", ".join(
+                    ("id TEXT PRIMARY KEY" if c == "id"
+                     else f"{c} {types.get(c, 'TEXT')}") for c in carry)
+                cols = ", ".join(carry)
+                conn.executescript(f"""
                     PRAGMA foreign_keys=off;
                     BEGIN;
-                    CREATE TABLE locks_new(
-                        id TEXT PRIMARY KEY, name TEXT, belt TEXT,
-                        image_url TEXT, page_url TEXT, source TEXT);
-                    INSERT OR IGNORE INTO locks_new
-                        SELECT id,name,belt,image_url,page_url,source FROM locks;
+                    CREATE TABLE locks_new({defs});
+                    INSERT OR IGNORE INTO locks_new({cols})
+                        SELECT {cols} FROM locks;
                     DROP TABLE locks;
                     ALTER TABLE locks_new RENAME TO locks;
                     COMMIT;
                     PRAGMA foreign_keys=on;
                 """)
-        except sqlite3.Error:
-            pass
+                log("Migrated the locks table off the old UNIQUE(name) "
+                    f"constraint, carrying {len(carry)} column(s).")
+        except sqlite3.Error as e:
+            log(f"locks-table migration skipped: {e}")
         # Add belt_full (full belt incl. Black sub-tier like "Black 3") if the
         # column doesn't exist yet. `belt` stays canonical ("Black") for
         # filters/colors; belt_full is populated on the next catalog sync.
@@ -4492,6 +4779,38 @@ def log(msg):
 _SEARCH_LOCKWORD_MEMO = {}      # lock_name -> bool; the answer is the same for
                                 # every row of a lock, and this runs per row
 
+_MODEL_NAME_RE = re.compile(r"\d")
+
+
+def _title_is_the_named_lock(lock_name, title):
+    """True when the title is, in substance, just this lock's catalogue name.
+
+    Most real listings for a specific lock are terse — "Abloy Protec2 CY322",
+    "Medeco Biaxial Original", "EVVA 3KS" — and say no lock word anywhere.
+    Requiring one threw away the majority of genuine hits for any lock whose
+    own name doesn't contain "lock"/"padlock"/"cylinder".
+
+    Two conditions keep this from letting junk back in:
+      * the name must be DISTINCTIVE — at least two words, with a model-number
+        word among them (a digit) or a word long enough not to be a coincidence.
+        A one-word catalogue name like "Bond" never qualifies.
+      * the name must appear as a contiguous phrase, with at most three other
+        words in the title. "Sol 2500 solar eclipse sunglasses" is stopped by
+        the wrong-category veto, which runs before this is ever consulted.
+    """
+    nf, tf = _fold(lock_name), _fold(title)
+    if not nf or not tf:
+        return False
+    parts = nf.split()
+    if len(parts) < 2:
+        return False
+    if not any(_MODEL_NAME_RE.search(p) or len(p) >= 6 for p in parts):
+        return False
+    if f" {nf} " not in f" {tf} ":
+        return False
+    return len(tf.split()) - len(parts) <= 3
+
+
 def _looks_like_lock_listing(lock_name, title, site):
     """The same test the 'Lock results only' display filter applies — the two
     are kept character-for-character equivalent (raw title to _is_key_blank,
@@ -4509,7 +4828,15 @@ def _looks_like_lock_listing(lock_name, title, site):
         if len(_SEARCH_LOCKWORD_MEMO) > 4000:
             _SEARCH_LOCKWORD_MEMO.clear()
         has_word = _SEARCH_LOCKWORD_MEMO[key] = _search_has_lock_word(key)
-    return has_word or _has_lock_context(_strip_css_junk(t))
+    if has_word:
+        return True
+    clean = _strip_css_junk(t)
+    if _has_lock_context(clean):
+        return True
+    # last chance: the title IS the lock's name (see above). Never reached for
+    # a title the category veto has already rejected.
+    return (not _wrong_product_category(clean)
+            and _title_is_the_named_lock(key, clean))
 
 def _insert_listing_row(conn, lock_name, it):
     """Insert one found listing into the current-results table (`listings`,
@@ -4533,7 +4860,7 @@ def _insert_listing_row(conn, lock_name, it):
     cur = _resolve_currency(price, it.get("currency", ""), site)
     vals = (lock_name, it.get("title", ""), price,
             cur, str(it.get("condition", "")).lower(),
-            site, it.get("url", ""), it.get("location", ""),
+            site, _canon_listing_url(it.get("url", "")), it.get("location", ""),
             ship, it.get("notes", ""), str(it.get("seller", "") or ""),
             str(it.get("image", "") or ""),
             datetime.datetime.now().isoformat(timespec="seconds"))
@@ -4706,6 +5033,311 @@ def take_newly_broken_sites():
             pass
 
 
+CUSTOM_ID_PREFIX = "custom:"
+
+
+def custom_lock_rows(conn=None):
+    """Hand-added locks as [(fold, name)], sorted by name. These are not in
+    the LPU catalog and exist only on the priority list."""
+    own = conn is None
+    try:
+        if own:
+            conn = db()
+        return [(r[0], r[1]) for r in conn.execute(
+            "SELECT key, name FROM custom_locks ORDER BY name COLLATE NOCASE")
+            if r[0] and r[1]]
+    except sqlite3.Error as e:
+        log(f"custom_lock_rows failed: {e}")
+        return []
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def add_custom_lock(name):
+    """Add a hand-typed lock to the priority list.
+
+    Returns (outcome, detail):
+      ("added", name)        — stored as a new custom priority
+      ("exists", name)       — already on the custom list
+      ("catalog", real_name) — the name IS in the LPU catalog, so the caller
+                               should prioritise the real lock(s) instead of
+                               inventing a duplicate; detail is the catalog
+                               spelling and the caller gets the ids from
+                               catalog_ids_for_name()
+      ("empty", "")          — nothing usable was typed
+      (None, "")             — the database refused the write
+    """
+    name = " ".join((name or "").split())[:120]
+    # must contain something searchable — "!!!" or "---" is not a lock name.
+    # str.isalnum() is Unicode-aware, so 南京錠 and МЕДЕКО pass.
+    if not name or not any(ch.isalnum() for ch in name):
+        return ("empty", "")
+    key = _pkey(name)
+    fold = _fold(name)
+    try:
+        conn = db()
+    except sqlite3.Error as e:
+        log(f"add_custom_lock could not open the database: {e}")
+        return (None, "")
+    try:
+        # a name that IS in the catalog should prioritise the real lock
+        for r in conn.execute("SELECT name FROM locks"):
+            if r[0] and (_pkey(r[0]) == key or (fold and _fold(r[0]) == fold)):
+                return ("catalog", r[0])
+        row = conn.execute("SELECT name FROM custom_locks WHERE key=?",
+                           (key,)).fetchone()
+        if row:
+            return ("exists", row[0])
+        conn.execute(
+            "INSERT INTO custom_locks(key, name, added_at) VALUES(?,?,?)",
+            (key, name,
+             datetime.datetime.now().isoformat(timespec="seconds")))
+        conn.commit()
+        return ("added", name)
+    except sqlite3.Error as e:
+        log(f"add_custom_lock failed: {e}")
+        return (None, "")
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+
+def reconcile_custom_locks(conn):
+    """A hand-added lock that LPU has since catalogued stops being custom.
+
+    Without this the two surfaces disagree forever: the Locks tab stars the
+    real catalog row by id (so: no star) while the results table colours by
+    name (so: blue). Worse, "not on LPU *yet*" is the whole point of the
+    feature, and on a fresh install — before the first catalog sync — every
+    typed name becomes a custom entry that would never heal.
+
+    Called after a successful catalog write. Returns how many were promoted.
+    """
+    try:
+        rows = list(conn.execute("SELECT key, name FROM custom_locks"))
+        if not rows:
+            return 0
+        catalog = [(r[0], r[1]) for r in conn.execute(
+            "SELECT id, name FROM locks") if r[0] and r[1]]
+        by_key = {}
+        for lid, nm in catalog:
+            by_key.setdefault(_pkey(nm), []).append(lid)
+            f = _fold(nm)
+            if f:
+                by_key.setdefault(f, []).append(lid)
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        promoted = 0
+        for key, nm in rows:
+            ids = by_key.get(key) or by_key.get(_fold(nm) or "\0") or []
+            if not ids:
+                continue
+            conn.executemany(
+                "INSERT OR IGNORE INTO priority_locks(lock_id, added_at)"
+                " VALUES(?,?)", [(i, now) for i in ids])
+            conn.execute("DELETE FROM custom_locks WHERE key=?", (key,))
+            promoted += 1
+        if promoted:
+            conn.commit()
+            log(f"{promoted} of your own lock entries are now in the LPU "
+                f"catalog — promoted to real priority locks.")
+        return promoted
+    except sqlite3.Error as e:
+        log(f"reconcile_custom_locks failed: {e}")
+        return 0
+
+
+def catalog_ids_for_name(name, conn=None):
+    """Every catalog lock id whose name matches `name`. Returns None if the
+    database could not be read, so callers can tell that apart from "no such
+    lock" — they are very different things to report to the user."""
+    key = _pkey(name)
+    fold = _fold(name or "")
+    own = conn is None
+    try:
+        if own:
+            conn = db()
+        return [r[0] for r in conn.execute("SELECT id, name FROM locks")
+                if r[0] and r[1]
+                and (_pkey(r[1]) == key or (fold and _fold(r[1]) == fold))]
+    except sqlite3.Error as e:
+        log(f"catalog_ids_for_name failed: {e}")
+        return None
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def remove_custom_locks(keys, conn=None):
+    """Delete hand-added locks outright. Un-prioritising one IS deleting it —
+    a custom lock has no other purpose. Returns rows removed, None on error.
+    Pass an open connection to make this part of a larger transaction."""
+    keys = [k for k in keys if k]
+    if not keys:
+        return 0
+    own = conn is None
+    if own:
+        try:
+            conn = db()
+        except sqlite3.Error as e:
+            log(f"remove_custom_locks could not open the database: {e}")
+            return None
+    try:
+        before = conn.total_changes
+        conn.executemany("DELETE FROM custom_locks WHERE key=?",
+                         [(k,) for k in keys])
+        if own:
+            conn.commit()
+        return conn.total_changes - before
+    except sqlite3.Error as e:
+        log(f"remove_custom_locks failed: {e}")
+        return None
+    finally:
+        if own:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def priority_lock_ids(conn=None):
+    """The set of lock ids marked as a priority. Hand-added custom locks are
+    included as synthetic 'custom:<folded name>' ids, so the Locks table, the
+    right-click menu and the star all treat them like any other priority."""
+    own = conn is None
+    try:
+        if own:
+            conn = db()
+        ids = {r[0] for r in conn.execute(
+            "SELECT lock_id FROM priority_locks")}
+        ids |= {CUSTOM_ID_PREFIX + f for f, _n in custom_lock_rows(conn)}
+        return ids
+    except sqlite3.Error:
+        return set()
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def priority_lock_names(conn=None):
+    """Priority locks as FOLDED names — results rows carry a lock_name, not an
+    id, so highlighting and ordering match on the name. Returns None (not an
+    empty set) if the database can't be read, so callers can tell "you have no
+    priorities" apart from "I couldn't look" and avoid caching a failure."""
+    own = conn is None
+    try:
+        if own:
+            conn = db()
+        raw = [r[0] for r in conn.execute(
+            "SELECT l.name FROM priority_locks p"
+            " JOIN locks l ON l.id = p.lock_id") if r[0]]
+        raw += [n for _k, n in custom_lock_rows(conn)]
+        # BOTH forms: _fold() for the accent-blind title matching the results
+        # table has always used, and _pkey() so names that fold to nothing
+        # (CJK, Cyrillic) still highlight. Empty folds are dropped — they
+        # would match every other non-Latin lock.
+        names = {_pkey(n) for n in raw}
+        names |= {f for f in (_fold(n) for n in raw) if f}
+        return names
+    except sqlite3.Error as e:
+        log(f"priority_lock_names failed: {e}")
+        return None
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def _same_name_lock_ids(conn, ids):
+    """Every catalog id that shares a NAME with one of `ids`.
+
+    The LPU catalog legitimately repeats a name across belts, and stored
+    listings carry a lock NAME, not an id — so marking one of a pair of
+    same-named locks and not the other would make the Locks tab (which shows
+    the star by id) and the results table (which colours by name) disagree.
+    Marking by name keeps both surfaces telling the same story."""
+    batch = list(ids)
+    out = set(batch)
+    try:
+        # chunked: SQLite caps host parameters (999 on builds before 3.32)
+        for i in range(0, len(batch), 400):
+            part = batch[i:i + 400]
+            qs = ",".join("?" * len(part))
+            for r in conn.execute(
+                    f"SELECT id FROM locks WHERE name IN"
+                    f" (SELECT name FROM locks WHERE id IN ({qs}))", part):
+                if r[0]:
+                    out.add(r[0])
+    except sqlite3.Error:
+        pass          # fall back to exactly the ids we were handed
+    return out
+
+
+def set_priority_locks(lock_ids, on):
+    """Mark (on=True) or unmark a batch of lock ids. Returns how many rows
+    actually changed, or None if the write failed (which is NOT the same as
+    "nothing needed changing").
+
+    Synthetic 'custom:<fold>' ids are hand-added locks: they are always
+    priorities, so marking one is a no-op and unmarking DELETES it."""
+    ids = [i for i in lock_ids if i]
+    if not ids:
+        return 0
+    customs = [i[len(CUSTOM_ID_PREFIX):] for i in ids
+               if i.startswith(CUSTOM_ID_PREFIX)]
+    ids = [i for i in ids if not i.startswith(CUSTOM_ID_PREFIX)]
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    try:
+        conn = db()
+    except sqlite3.Error as e:
+        log(f"set_priority_locks could not open the database: {e}")
+        return None
+    try:
+        # ONE transaction for both kinds. Deleting the custom locks first and
+        # committing separately would destroy them and then report failure if
+        # the second write went wrong.
+        before = conn.total_changes
+        if customs and not on:
+            if remove_custom_locks(customs, conn) is None:
+                return None
+        if ids:
+            ids = sorted(_same_name_lock_ids(conn, ids))
+            if on:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO priority_locks(lock_id, added_at)"
+                    " VALUES(?,?)", [(i, now) for i in ids])
+            else:
+                conn.executemany("DELETE FROM priority_locks WHERE lock_id=?",
+                                 [(i,) for i in ids])
+        conn.commit()
+        return conn.total_changes - before
+    except sqlite3.Error as e:
+        log(f"set_priority_locks failed: {e}")
+        try:
+            conn.rollback()   # nothing half-applied: custom deletes revert too
+        except sqlite3.Error:
+            pass
+        return None
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+
 def purge_junk_price_history(conn):
     """One-time cleanup of price history collected BEFORE non-lock listings
     were kept out of it. Without this, an upgrading user keeps seeing the old
@@ -4771,18 +5403,73 @@ def load_cfg():
     try:
         with open(CFG_PATH, encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        # Do NOT quietly start from {} — the next save would overwrite a file
+        # that still holds the user's API key and profile link with defaults.
+        # Keep the damaged file so it can be recovered by hand, and say so.
+        try:
+            bad = CFG_PATH + ".corrupt"
+            if os.path.exists(CFG_PATH) and not os.path.exists(bad):
+                shutil.copyfile(CFG_PATH, bad)
+                log(f"config.json is unreadable ({e}). A copy was kept as "
+                    f"{os.path.basename(bad)}; starting from defaults.")
+            else:
+                log(f"config.json is unreadable ({e}); starting from defaults.")
+        except Exception:
+            pass
         return {}
 
+_CFG_LOCK = threading.Lock()
+
+
+def _write_json_atomic(path, payload):
+    """Write JSON so a kill mid-write can never leave a half file.
+
+    The app exits with os._exit(0), which kills daemon threads without
+    unwinding — a plain open(path, "w") truncates first, so the side-files
+    (wishlist baseline, owners cache, bazaar snapshot) could be found empty on
+    the next launch and silently reset. Temp file + os.replace makes the swap
+    atomic. Returns True on success."""
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        log(f"Could not save {os.path.basename(path)}: {e}")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return False
+
 def save_cfg(cfg):
-    # Atomic (temp file + os.replace): config is now written often (window
-    # moves, sort clicks), and a kill/power-cut mid-write must never truncate
-    # cfg.json — load_cfg would silently return {} and lose every setting.
+    # Atomic (temp file + os.replace) AND serialized. Config is written from
+    # the UI thread on every toggle/sort/window-move and from the sync and
+    # profile worker threads, so a shared temp path let two writers interleave
+    # — one os.replace'd a file the other had already renamed away
+    # (FileNotFoundError straight into a crash dialog), and json.dump could
+    # walk a dict another thread was mutating.
     ensure_dirs()
-    tmp = CFG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f)
-    os.replace(tmp, CFG_PATH)
+    with _CFG_LOCK:
+        snapshot = dict(cfg)
+        tmp = f"{CFG_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f)
+            os.replace(tmp, CFG_PATH)
+        except OSError as e:
+            log(f"Could not save settings: {e}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
 
 def _rotate_log(max_bytes=2_000_000, keep_bytes=1_000_000):
     """Cap the app log. lockhunter.log is append-only during a run; once at
@@ -4996,6 +5683,17 @@ def _upsert_catalog_rows(rows):
                 (lid, name, belt, belt_full, img, page, "lpu", cnt))
             n += 1
         conn.commit()
+        # Drop priority flags whose catalog lock no longer exists. Only safe
+        # AFTER a catalog write that actually loaded rows — on an empty locks
+        # table this would wipe every priority the user has set.
+        if n:
+            try:
+                conn.execute("DELETE FROM priority_locks WHERE lock_id NOT IN"
+                             " (SELECT id FROM locks)")
+                conn.commit()
+            except sqlite3.Error:
+                pass
+            reconcile_custom_locks(conn)
     finally:
         conn.close()
     return n
@@ -5569,15 +6267,11 @@ def _wl_load_seen():
 
 def _wl_save_seen(urls):
     """Record this run's full findings as the new baseline for next time."""
-    try:
-        os.makedirs(APP_DIR, exist_ok=True)
-        with open(_wl_seen_path(), "w", encoding="utf-8") as f:
-            json.dump({"v": _WL_SEEN_VER,
-                       "urls": sorted(u for u in urls if u),
-                       "ts": datetime.datetime.now().isoformat(
-                           timespec="seconds")}, f)
-    except Exception:
-        pass
+    _write_json_atomic(_wl_seen_path(),
+                       {"v": _WL_SEEN_VER,
+                        "urls": sorted(u for u in urls if u),
+                        "ts": datetime.datetime.now().isoformat(
+                            timespec="seconds")})
 
 
 def _wl_has_baseline():
@@ -6325,8 +7019,7 @@ def save_owners_cache(owners):
                         "owned": sorted(o.get("owned") or [])}
                        for o in owners],
         }
-        with open(_owners_cache_path(), "w", encoding="utf-8") as f:
-            json.dump(payload, f)
+        _write_json_atomic(_owners_cache_path(), payload)
     except Exception:
         pass   # cache is best-effort
 
@@ -6965,11 +7658,28 @@ class FlatButton(tk.Frame):
             self.configure(bg=self._bg); self.lbl.configure(bg=self._bg)
     def _on_press(self, _=None):
         if self._enabled:
+            self._pressed = True
             self.lbl.configure(padx=16, pady=8)
-    def _on_release(self, _=None):
-        if self._enabled and self.command:
-            self.lbl.configure(padx=16, pady=7)
-            self.command()
+    def _on_release(self, evt=None):
+        was = getattr(self, "_pressed", False)
+        self._pressed = False
+        if not (self._enabled and self.command and was):
+            return          # stray release, or the press happened elsewhere
+        self.lbl.configure(padx=16, pady=7)
+        # Dragging off a button before letting go is how every real button is
+        # cancelled. Tk's implicit grab still delivers the release here, with
+        # coordinates outside the widget — so check them.
+        try:
+            w, h = self.winfo_width(), self.winfo_height()
+            x, y = evt.x, evt.y
+            if evt.widget is self.lbl:
+                x += self.lbl.winfo_x()
+                y += self.lbl.winfo_y()
+            if not (0 <= x < w and 0 <= y < h):
+                return
+        except Exception:
+            pass
+        self.command()
 
     def set_enabled(self, on):
         self._enabled = bool(on)
@@ -7013,7 +7723,10 @@ class LockHunter(tk.Tk):
     C_PANEL2 = "#272e35"  # card header / hover
     C_FIELD = "#0f1317"   # inputs / table body
     C_TEXT = "#eceef0"    # primary text
-    C_MUTE = "#8b939b"    # secondary text
+    # secondary text. Lightened from #8b939b, which measured 4.41:1 on the
+    # C_PANEL2 header/status-bar surface — under the 4.5:1 WCAG AA floor for
+    # text this small. #969ea6 clears it on every surface the app uses.
+    C_MUTE = "#969ea6"    # secondary text
     C_ACCENT = "#e0a231"  # belt-buckle amber
     C_ACCENT2 = "#f0b445" # accent hover (brighter)
     C_LINE = "#333b43"    # borders / separators
@@ -7021,6 +7734,7 @@ class LockHunter(tk.Tk):
     C_BAZAAR = "#5cc8ff"  # light blue — Lock Bazaar "found" highlight
     C_DEAL = "#3fb950"    # green — "good price" (deal) row highlight
     C_BAD = "#f2545b"     # red — a marketplace that has stopped responding
+    C_PRIORITY = "#5cc8ff"  # blue — locks you flagged as a priority
 
     def report_callback_exception(self, exc_type, exc_value, exc_tb):
         """Tk calls this when an exception escapes an event callback (a button
@@ -7076,7 +7790,14 @@ class LockHunter(tk.Tk):
         _rotate_log()      # cap the log once per launch (atomic, best-effort)
         # cap the thumbnail cache in the background so startup stays snappy
         threading.Thread(target=_prune_image_cache, daemon=True).start()
-        init_db()          # create tables + run migrations once
+        # A corrupt lockhunter.db used to raise straight out of __init__ and
+        # show a generic "fatal error" dialog on EVERY launch, with no hint of
+        # what was wrong. Name the problem and offer to move the bad file
+        # aside so the app can start (collection re-imports in seconds).
+        try:
+            init_db()      # create tables + run migrations once
+        except sqlite3.DatabaseError as e:
+            self._recover_broken_db(e)
         self.cfg = load_cfg()
         # One-time: scrub non-lock rows collected into the price history by
         # older builds, so "Times seen" / "Typical price" / the deal median
@@ -7366,8 +8087,20 @@ class LockHunter(tk.Tk):
         # change reaches every existing shortcut the moment the new build
         # runs once, without re-running any installer.
         _refresh_stable_icons()
-        ico = resource_path("assets", "lpu_icon.ico")
-        png = resource_path("assets", "lpu_icon_256.png")
+        # Prefer the STABLE copies under ~/.lockhunter/assets over the ones in
+        # the PyInstaller unpack folder. Tk keeps the icon file open for the
+        # life of the window, and a handle inside %TEMP%\\_MEIxxxxxx is exactly
+        # what stops the bootloader deleting that folder on exit ("Failed to
+        # remove temporary directory"). _refresh_stable_icons has just written
+        # this build's icons there, so they are always current.
+        stable = os.path.join(os.path.expanduser("~"), ".lockhunter", "assets")
+        def _icon(name):
+            local = os.path.join(stable, name)
+            if os.path.exists(local):
+                return local
+            return resource_path("assets", name)
+        ico = _icon("lpu_icon.ico")
+        png = _icon("lpu_icon_256.png")
         self._icon_paths = (ico, png)
         found = []
         # .ico for the Windows title bar / taskbar
@@ -7382,7 +8115,8 @@ class LockHunter(tk.Tk):
         try:
             if os.path.exists(png):
                 if HAVE_PIL:
-                    self._app_icon = ImageTk.PhotoImage(Image.open(png))
+                    with Image.open(png) as _im:      # close the file handle
+                        self._app_icon = ImageTk.PhotoImage(_im.copy())
                 else:
                     self._app_icon = tk.PhotoImage(file=png)
                 self.iconphoto(True, self._app_icon)
@@ -7533,6 +8267,47 @@ class LockHunter(tk.Tk):
     # "measured from the right screen edge" — different thing entirely.)
     _GEOM_RE = re.compile(r"^(\d{3,5})x(\d{3,5})\+(-?\d+)\+(-?\d+)$")
 
+    def _recover_broken_db(self, err):
+        """lockhunter.db could not be opened. Explain it, and offer the one
+        repair a user can actually perform: set the damaged file aside and
+        start fresh. Everything in it re-downloads (catalog, profile); only
+        local price history and priorities are lost, so this is never done
+        without asking."""
+        log(f"Database unreadable: {err}")
+        keep = f"{DB_PATH}.broken-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+        if not messagebox.askyesno(
+                "Lock Hunter — database problem",
+                f"Lock Hunter's database can't be opened:\n\n{err}\n\n"
+                "This usually means the file was damaged by a power cut or a "
+                "disk problem.\n\nSet the damaged file aside and start with a "
+                "fresh one? Your catalog and collection re-download on their "
+                "own; locally-stored price history and priority flags would "
+                "be lost.\n\nThe old file is kept, not deleted, so it can "
+                "still be recovered by hand:\n"
+                f"{os.path.basename(keep)}"):
+            messagebox.showinfo(
+                "Lock Hunter",
+                "Leaving the database alone. Lock Hunter can't run until it "
+                "is repaired or removed — it lives in:\n\n" + APP_DIR)
+            raise SystemExit(1)
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                src = DB_PATH + suffix
+                if os.path.exists(src):
+                    os.replace(src, keep + suffix)
+            init_db()
+            log(f"Started a fresh database; the damaged one is at {keep}")
+            messagebox.showinfo(
+                "Lock Hunter",
+                "Started with a fresh database. The damaged one was kept as\n"
+                f"{os.path.basename(keep)}\n\nin " + APP_DIR)
+        except Exception as e2:
+            messagebox.showerror(
+                "Lock Hunter",
+                f"Couldn't replace the damaged database: {e2}\n\n"
+                f"Please delete or rename this file by hand:\n{DB_PATH}")
+            raise SystemExit(1)
+
     def _restore_window_geometry(self):
         """Reapply the last session's window size/position/maximized state
         (saved eagerly by _save_window_state). Off-screen or nonsense values
@@ -7681,8 +8456,11 @@ class LockHunter(tk.Tk):
         tk.Frame(self, bg=self.C_ACCENT, height=2).pack(fill="x")
 
         # ---- tab body container (pages stack in the same spot)
+        # NOTE: packed LAST (below), after the status bar has claimed its strip
+        # at the bottom. Pack hands out space in pack order, so if the page
+        # area went first it would take the whole window on a short screen and
+        # push the status bar (and Export / Help / version) off the display.
         self._pages = tk.Frame(self, bg=self.C_BG)
-        self._pages.pack(fill="both", expand=True)
         self.page_search = tk.Frame(self._pages, bg=self.C_BG)
         self.page_locks = tk.Frame(self._pages, bg=self.C_BG)
         self.page_collection = tk.Frame(self._pages, bg=self.C_BG)
@@ -7696,12 +8474,23 @@ class LockHunter(tk.Tk):
         self._build_owners_tab(self.page_owners)
 
         # ---- status bar (with version on the right)
-        tk.Frame(self, bg=self.C_LINE, height=1).pack(fill="x")
+        # Packed to the BOTTOM before the page area, so it is never the thing
+        # that gets clipped when the window is short.
         statusbar = tk.Frame(self, bg=self.C_PANEL2)
-        statusbar.pack(fill="x")
+        statusbar.pack(side="bottom", fill="x")
+        tk.Frame(self, bg=self.C_LINE, height=1).pack(side="bottom", fill="x")
         self.status = tk.StringVar(value="Ready — pick a lock and click Search live. Double-click a result to open it.")
-        tk.Label(statusbar, textvariable=self.status, bg=self.C_PANEL2, fg=self.C_MUTE,
-                 font=("Segoe UI", 9), anchor="w", padx=14, pady=7).pack(side="left")
+        # width=1 and no textvariable: with either, the label REQUESTS as much
+        # room as its text needs, so pack hands it the whole bar and a long
+        # message runs straight over the Export / Help / updates links. The
+        # text is set by _fit_status_text, trimmed to the space left over.
+        self.status_label = tk.Label(
+            statusbar, text=self.status.get(), bg=self.C_PANEL2, width=1,
+            fg=self.C_MUTE, font=("Segoe UI", 9), anchor="w", padx=14, pady=7)
+        # Packed LAST (below), after the right-hand links have claimed their
+        # space: a long status line — an image-fetch error carries a whole
+        # urllib3 repr — used to take the entire bar and push Export, Help,
+        # Check for updates and the version number off the window.
         tk.Label(statusbar, text=f"v{VERSION}", bg=self.C_PANEL2, fg=self.C_MUTE,
                  font=("Segoe UI", 9), padx=14, pady=7).pack(side="right")
         upd = tk.Label(statusbar, text="Check for updates", bg=self.C_PANEL2,
@@ -7725,6 +8514,14 @@ class LockHunter(tk.Tk):
                        cursor="hand2", pady=7)
         exp.pack(side="right", padx=(0, 16))
         exp.bind("<Button-1>", lambda _e: self._export_search_xlsx())
+        # the message gets whatever is left, and is trimmed to fit
+        self.status_label.pack(side="left", fill="x", expand=True)
+        self.status_label.bind(
+            "<Configure>", lambda _e: self._fit_status_text())
+        self.status.trace_add("write", lambda *_a: self._fit_status_text())
+
+        # now the pages take whatever height is left over
+        self._pages.pack(side="top", fill="both", expand=True)
 
         self._show_tab("Search")
 
@@ -8420,7 +9217,7 @@ class LockHunter(tk.Tk):
             return
         page = self._compare_pages.get(sel[0])
         if page:
-            webbrowser.open(page)
+            open_url(page)
 
     def _compare_export_choose(self):
         """Ask how to export the current Compare results: copy to clipboard,
@@ -8436,7 +9233,7 @@ class LockHunter(tk.Tk):
         win = tk.Toplevel(self)
         win.title("Export comparison")
         win.configure(bg=self.C_PANEL)
-        win.geometry("400x250")
+        win.geometry("400x290")
         win.transient(self)
         try:
             win.grab_set()   # modal
@@ -8537,7 +9334,7 @@ class LockHunter(tk.Tk):
             try:
                 os.startfile(path)   # Windows: open in Excel
             except Exception:
-                webbrowser.open("file://" + path.replace("\\", "/"))
+                open_url("file://" + path.replace("\\", "/"))
 
     def _export_compare_xlsx(self):
         """Export the current Compare results (both trade directions) to an
@@ -8604,7 +9401,7 @@ class LockHunter(tk.Tk):
             try:
                 os.startfile(path)   # Windows: open in Excel
             except Exception:
-                webbrowser.open("file://" + path.replace("\\", "/"))
+                open_url("file://" + path.replace("\\", "/"))
 
     # ---------- OWNERS TAB ----------
 
@@ -8722,11 +9519,8 @@ class LockHunter(tk.Tk):
                 f"{len(new_entries)} new since last login; "
                 f"{len(lines)} on your wishlist"
                 + ("" if old_keys else " — first run, baseline saved"))
-            try:
-                with open(snap_path, "w", encoding="utf-8") as f:
-                    json.dump({"v": _BZ_SNAP_VER, "keys": sorted(cur_keys)}, f)
-            except Exception:
-                pass
+            _write_json_atomic(snap_path,
+                               {"v": _BZ_SNAP_VER, "keys": sorted(cur_keys)})
             if lines:
                 self.q.put(("bazaar_news", lines))
         except Exception:
@@ -8793,8 +9587,12 @@ class LockHunter(tk.Tk):
                        "\u2605 most common"),
                  bg=self.C_PANEL, fg=self.C_MUTE, font=LF).pack(side="left")
         self.owners_count_var = tk.StringVar(value="")
-        tk.Label(info_row, textvariable=self.owners_count_var,
-                 bg=self.C_PANEL, fg=self.C_MUTE, font=LF).pack(side="right")
+        # anchor="e" + no expand: a tk.Label CENTRES its text, so when the
+        # count grew past its allotted width it overflowed LEFTWARDS and drew
+        # on top of the legend.
+        tk.Label(info_row, textvariable=self.owners_count_var, anchor="e",
+                 bg=self.C_PANEL, fg=self.C_MUTE,
+                 font=LF).pack(side="right", fill="x", expand=True)
         ctrl = tk.Frame(body, bg=self.C_PANEL)
         ctrl.pack(fill="x", pady=(0, 10))
         tk.Label(ctrl, text="Find lock:", bg=self.C_PANEL, fg=self.C_MUTE,
@@ -8822,20 +9620,27 @@ class LockHunter(tk.Tk):
                                      command=self._start_owner_search,
                                      kind="primary")
         self.owners_btn.pack(side="left")
-        self.owners_refresh_btn = FlatButton(ctrl, "Refresh all",
+        # The other four buttons get their OWN row. On one row with the Find
+        # box and the belt filter they needed ~1290px, so at the app's default
+        # 1200px window "Export CSV" was never drawn at all and "Top Bazaar
+        # sellers" was clipped mid-word — three of five features unreachable
+        # with no keyboard alternative.
+        ctrl2 = tk.Frame(body, bg=self.C_PANEL)
+        ctrl2.pack(fill="x", pady=(0, 10))
+        self.owners_refresh_btn = FlatButton(ctrl2, "Refresh all",
                                              command=self._refresh_owners,
                                              kind="outline")
-        self.owners_refresh_btn.pack(side="left", padx=(10, 0))
+        self.owners_refresh_btn.pack(side="left")
         self.wishtop_btn = FlatButton(
-            ctrl, "Top wishlist owners",
+            ctrl2, "Top wishlist owners",
             command=self._start_wishlist_top_owners, kind="outline")
         self.wishtop_btn.pack(side="left", padx=(10, 0))
         self.bztop_btn = FlatButton(
-            ctrl, "Top Bazaar sellers",
+            ctrl2, "Top Bazaar sellers",
             command=self._start_bazaar_top_sellers, kind="outline")
         self.bztop_btn.pack(side="left", padx=(10, 0))
         self.owners_export_btn = FlatButton(
-            ctrl, "Export CSV", command=self._export_owners_csv,
+            ctrl2, "Export CSV", command=self._export_owners_csv,
             kind="outline")
         self.owners_export_btn.pack(side="left", padx=(10, 0))
 
@@ -9294,7 +10099,7 @@ class LockHunter(tk.Tk):
             try:
                 os.startfile(path)   # Windows: open in Excel
             except Exception:
-                webbrowser.open("file://" + path.replace("\\", "/"))
+                open_url("file://" + path.replace("\\", "/"))
 
     def _owners_open_profile(self, _e):
         sel = self.owners_tree.selection()
@@ -9302,7 +10107,7 @@ class LockHunter(tk.Tk):
             return
         url = self._owners_profiles.get(sel[0])
         if url:
-            webbrowser.open(url)
+            open_url(url)
 
 
     @staticmethod
@@ -9333,7 +10138,7 @@ class LockHunter(tk.Tk):
             menu.add_separator()
             menu.add_command(
                 label=f"Open {who}'s LPU profile",
-                command=lambda u=url: webbrowser.open(u))
+                command=lambda u=url: open_url(u))
         else:
             menu.add_command(label="No public LPU profile for this row",
                              state="disabled")
@@ -9727,13 +10532,25 @@ class LockHunter(tk.Tk):
             side="left", padx=(0, 8))
         tk.Label(titlerow, text="RESULTS", bg=self.C_PANEL, fg=self.C_ACCENT,
                  font=("Segoe UI Semibold", 10)).pack(side="left")
+        # The live count sits next to the word RESULTS. Packed on the far
+        # right of the checkbox strip it was the first thing Tk clipped, so at
+        # the default window size the user could not see how many results a
+        # sweep had found.
+        self.results_count_var = tk.StringVar(value="")
+        tk.Label(titlerow, textvariable=self.results_count_var,
+                 bg=self.C_PANEL, fg=self.C_MUTE,
+                 font=("Segoe UI", 10)).pack(side="left", padx=(10, 0))
         # NOTE pack order = clipping priority: the FILTER controls are packed
         # before the two utility buttons, so if the window is squeezed narrow
         # it's the buttons that give way — never the filters.
         self._field_label(titlerow, "Filter:").pack(side="left", padx=(14, 6))
         self.filter_var = tk.StringVar()
         fe = ttk.Entry(titlerow, textvariable=self.filter_var, width=13)
-        fe.pack(side="left"); fe.bind("<KeyRelease>", lambda *_: self._refresh_table())
+        fe.pack(side="left")
+        # Debounced: a full table rebuild costs ~0.8s with a hunt's worth of
+        # results loaded, so redrawing on every keystroke froze the UI for
+        # seconds while typing a lock name.
+        fe.bind("<KeyRelease>", lambda *_: self._debounced_refresh_table())
         # Price range (USD). Two small boxes: hide listings whose USD-estimated
         # price falls outside [min, max]. Blank = no bound. Rows whose price
         # can't be parsed/converted are KEPT (never hide on doubt). Needs live
@@ -9770,7 +10587,7 @@ class LockHunter(tk.Tk):
         self._site_menu_state = None      # last (choices, broken) rendered
         # utility buttons LAST (they clip first on very narrow windows)
         FlatButton(titlerow, "Open log",
-                   command=lambda: webbrowser.open(LOG_PATH),
+                   command=lambda: open_url(LOG_PATH),
                    kind="subtle").pack(side="right")
         FlatButton(titlerow, "Clear results", command=self._clear_results,
                    kind="subtle").pack(side="right", padx=(0, 8))
@@ -9820,10 +10637,6 @@ class LockHunter(tk.Tk):
         # Live count so the result set is never a mystery ("N results", and
         # "showing first N of M" only in the extreme case the safety ceiling
         # is hit). Right-aligned, packed LAST so it clips first when narrow.
-        self.results_count_var = tk.StringVar(value="")
-        tk.Label(fstrip, textvariable=self.results_count_var, bg=self.C_PANEL,
-                 fg=self.C_MUTE, font=("Segoe UI", 10)).pack(side="right",
-                                                             padx=(10, 0))
 
         table = tk.Frame(results, bg=self.C_PANEL)
         table.pack(fill="both", expand=True)
@@ -9868,6 +10681,10 @@ class LockHunter(tk.Tk):
         # "Good price" rows (deal score) get a green foreground, layered on top
         # of the odd/even background stripe.
         self.tree.tag_configure("deal", foreground=self.C_DEAL)
+        # Priority locks (Locks tab -> right-click -> Mark as priority) read
+        # blue and are floated to the top of the table, so the things you are
+        # actively chasing are the first thing you see after a sweep.
+        self.tree.tag_configure("priority", foreground=self.C_PRIORITY)
         # "Scan in progress…" overlay, shown centered over the table while a
         # search runs. Created hidden; place()/place_forget() toggles it.
         self._scan_table = table
@@ -9892,7 +10709,8 @@ class LockHunter(tk.Tk):
                  font=LF).pack(side="left", padx=(0, 6))
         self.locks_show_var = tk.StringVar(value="All locks")
         sb = ttk.Combobox(ctrl, textvariable=self.locks_show_var, width=14, state="readonly",
-                          values=["All locks", "Locks I own", "My wishlist"])
+                          values=["All locks", "Locks I own", "My wishlist",
+                                  "My priorities"])
         sb.pack(side="left", padx=(0, 12))
         sb.bind("<<ComboboxSelected>>",
                 lambda *_: (self._refresh_locks_table(),
@@ -9915,6 +10733,33 @@ class LockHunter(tk.Tk):
         self.profile_btn = FlatButton(ctrl, "Update profile",
                                       command=self._start_profile_import, kind="primary")
         self.profile_btn.pack(side="right")
+        # ---- row 2: add a lock that isn't in the LPU catalog at all.
+        # Type a name, hit the button, and it joins "Show: My priorities" so it
+        # gets hunted with everything else. It is NOT added to the catalog, so
+        # it can't skew the belt counts or your collection percentage.
+        ctrl_custom = tk.Frame(body, bg=self.C_PANEL)
+        ctrl_custom.pack(fill="x", pady=(0, 8))
+        tk.Label(ctrl_custom, text="Not on LPU?", bg=self.C_PANEL,
+                 fg=self.C_MUTE, font=LF).pack(side="left", padx=(0, 6))
+        self.custom_lock_var = tk.StringVar()
+        ce = ttk.Entry(ctrl_custom, textvariable=self.custom_lock_var, width=30)
+        ce.pack(side="left", padx=(0, 8))
+        ce.bind("<Return>", lambda *_: self._add_custom_priority())
+        self.add_custom_btn = FlatButton(
+            ctrl_custom, "Add to priority",
+            command=self._add_custom_priority, kind="outline")
+        self.add_custom_btn.pack(side="left")
+        tk.Label(ctrl_custom,
+                 text="type any lock name and it joins your priority hunt",
+                 bg=self.C_PANEL, fg=self.C_MUTE,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(10, 0))
+
+        # The four hunt buttons live on their OWN row. Packed into the filter
+        # row they needed ~1500px of window before Tk stopped clipping them —
+        # at the default 1200px width the batch-hunt button and its scope
+        # label simply weren't on screen.
+        ctrl2 = tk.Frame(body, bg=self.C_PANEL)
+        ctrl2.pack(fill="x", pady=(0, 10))
         # Batch "hunt my whole wishlist" — available from the "All locks" or
         # "My wishlist" views (it always hunts the WISHLIST regardless of the
         # view, honoring the belt filter). Runs the FREE (no-API-credit) search
@@ -9924,12 +10769,12 @@ class LockHunter(tk.Tk):
         # search has laid down a baseline to diff against. Packed FIRST so it
         # sits on the RIGHT (swapped with "Search for Wishlist Locks").
         self.hunt_new_btn = FlatButton(
-            ctrl, "Only new searches",
+            ctrl2, "Only new searches",
             command=lambda: self._toggle_wishlist_hunt(True), kind="outline")
         self.hunt_new_btn.pack(side="right", padx=(0, 10))
         # Full wishlist hunt — now on the LEFT of the pair.
         self.hunt_wishlist_btn = FlatButton(
-            ctrl, "Search for Wishlist Locks",
+            ctrl2, "Search for Wishlist Locks",
             command=lambda: self._toggle_wishlist_hunt(False), kind="outline")
         self.hunt_wishlist_btn.pack(side="right", padx=(0, 10))
         # Batch hunt — any set of locks: the selected rows (Ctrl/Shift-click),
@@ -9937,13 +10782,21 @@ class LockHunter(tk.Tk):
         # don't own" = Belt: Purple + this button). Same FREE engine as the
         # wishlist hunt; never touches the wishlist "only new" baseline.
         self.hunt_batch_btn = FlatButton(
-            ctrl, "Hunt these locks",
+            ctrl2, "Hunt these locks",
             command=self._toggle_batch_hunt, kind="outline")
         self.hunt_batch_btn.pack(side="right", padx=(0, 10))
+        # Escape hatch for the above: drop the row picks so "Hunt these locks"
+        # goes back to meaning the whole filtered view. Enabled only when
+        # something is actually picked.
+        self.clear_picks_btn = FlatButton(
+            ctrl2, "Clear picks",
+            command=self._clear_locks_selection, kind="outline")
+        self.clear_picks_btn.pack(side="right", padx=(0, 10))
+        self.clear_picks_btn.set_enabled(False)
         self._sync_hunt_wishlist_button()
         self.locks_count_var = tk.StringVar(value="")
-        tk.Label(ctrl, textvariable=self.locks_count_var, bg=self.C_PANEL, fg=self.C_MUTE,
-                 font=LF).pack(side="right", padx=(0, 12))
+        tk.Label(ctrl2, textvariable=self.locks_count_var, bg=self.C_PANEL,
+                 fg=self.C_MUTE, font=LF).pack(side="left")
 
         # table on the left, a lock-image preview on the right (fills the
         # empty space). They sit side by side in this row.
@@ -9957,8 +10810,8 @@ class LockHunter(tk.Tk):
         # from how many LPU members own the lock (from the catalog sync); the
         # column still sorts by the underlying count. A trailing "pad" column
         # absorbs the extra width so the real columns group left.
-        cols = ("name", "belt", "coll", "owned", "wishlist", "pad")
-        heads = ("Lock", "Belt", "Rarity", "Owned", "Wishlist", "")
+        cols = ("name", "belt", "coll", "owned", "wishlist", "priority", "pad")
+        heads = ("Lock", "Belt", "Rarity", "Owned", "Wishlist", "Priority", "")
         # slightly larger row + heading fonts on this tab (there's space)
         style = ttk.Style(self)
         style.configure("Locks.Treeview", font=("Segoe UI", 11), rowheight=26)
@@ -9968,6 +10821,7 @@ class LockHunter(tk.Tk):
         col_specs = [("name", 320, "w", False), ("belt", 88, "center", False),
                      ("coll", 88, "center", False),
                      ("owned", 66, "center", False), ("wishlist", 76, "center", False),
+                     ("priority", 72, "center", False),
                      ("pad", 20, "w", True)]
         self._locks_sort = ("name", False)   # (column, reverse)
         for (c, w, anchor, stretch), h in zip(col_specs, heads):
@@ -9983,10 +10837,14 @@ class LockHunter(tk.Tk):
         self.locks_tree.pack(side="left", fill="both", expand=True)
         self.locks_tree.tag_configure("odd", background=self.C_PANEL)
         self.locks_tree.tag_configure("even", background=self.C_FIELD)
+        # priority locks read blue here and in the results table
+        self.locks_tree.tag_configure("pri", foreground=self.C_PRIORITY)
         self.locks_tree.bind("<Double-1>", self._locks_open_page)
         self.locks_tree.bind("<Button-3>", self._locks_context_menu)  # right-click
         # selecting a row (single click / arrow keys) loads its image
-        self.locks_tree.bind("<<TreeviewSelect>>", self._on_locks_row_selected)
+        self.locks_tree.bind("<<TreeviewSelect>>", self._on_locks_selection)
+        # Esc drops the row picks — "Hunt these locks" then means the whole view
+        self.locks_tree.bind("<Escape>", self._clear_locks_selection)
 
         # ---- image preview panel (right side) ----
         preview = tk.Frame(tablerow, bg=self.C_PANEL, width=340)
@@ -10011,13 +10869,46 @@ class LockHunter(tk.Tk):
         self._locks_thumb_ref = None
         self._locks_thumb_current = ""   # name of the lock the preview shows
 
-        hint = tk.Label(body, text="Click a lock to preview its image  ·  double-click to open the LPU page  ·  right-click to search this lock.",
-                        bg=self.C_PANEL, fg=self.C_MUTE, font=("Segoe UI", 9))
-        hint.pack(anchor="w", pady=(6, 0))
+        hint = tk.Label(
+            body,
+            text="Click a lock to preview it  ·  double-click for its LPU "
+                 "page  ·  right-click to search it or flag a priority  ·  "
+                 "Ctrl/Shift-click picks several (“Clear picks” unpicks).",
+            bg=self.C_PANEL, fg=self.C_MUTE, font=("Segoe UI", 9),
+            justify="left", anchor="w", wraplength=1100)
+        hint.pack(fill="x", anchor="w", pady=(6, 0))
+        # wrap instead of running off both edges on a narrow window
+        hint.bind("<Configure>",
+                  lambda e, w=hint: w.winfo_width() > 40
+                  and w.config(wraplength=w.winfo_width() - 8))
+
+    def _clear_locks_selection(self, _evt=None):
+        """Drops the row picks, so 'Hunt these locks' goes back to meaning the
+        whole view. Reached from the 'Clear picks' button and from Esc while
+        the lock list has keyboard focus."""
+        if not hasattr(self, "locks_tree"):
+            return
+        sel = self.locks_tree.selection()
+        if sel:
+            self.locks_tree.selection_remove(*sel)
+        self._sync_batch_hunt_button()
 
     def _refresh_locks_table(self):
         if not hasattr(self, "locks_tree"):
             return
+        # Remember which LOCKS were picked so the picks survive a repaint of
+        # the same view (marking priorities rebuilds every row). Changing the
+        # view itself deliberately drops them — a stale pick left over from
+        # another view is exactly how "Hunt these locks" ends up hunting one
+        # lock when you meant the whole list.
+        sig = (self.locks_show_var.get(), self.locks_belt_var.get(),
+               self.locks_find_var.get().strip())
+        keep_sel = set()
+        if sig == getattr(self, "_locks_view_sig", None):
+            idmap = getattr(self, "_locks_ids", {})
+            keep_sel = {idmap.get(i) for i in self.locks_tree.selection()}
+            keep_sel.discard(None)
+        self._locks_view_sig = sig
         for r in self.locks_tree.get_children():
             self.locks_tree.delete(r)
         self._locks_pages = {}
@@ -10033,15 +10924,41 @@ class LockHunter(tk.Tk):
             q += " AND EXISTS(SELECT 1 FROM my_collection m WHERE m.lock_id=locks.id AND m.status='own')"
         elif mode == "My wishlist":
             q += " AND EXISTS(SELECT 1 FROM my_collection m WHERE m.lock_id=locks.id AND m.status='wishlist')"
+        elif mode == "My priorities":
+            q += " AND EXISTS(SELECT 1 FROM priority_locks p WHERE p.lock_id=locks.id)"
         if belt and belt != "All belts":
             q += " AND locks.belt=?"; params.append(belt)
-        q += " ORDER BY locks.name LIMIT 4000"
+        # No SQL LIMIT: the Find box filters in Python (it folds accents and
+        # punctuation), so a LIMIT here would hide matches that sort late.
+        # The DISPLAY cap is applied below, after filtering.
+        q += " ORDER BY locks.name"
         conn = db()
         rows = conn.execute(q, params).fetchall()
+        pri_ids = priority_lock_ids(conn)    # same connection, no second open
+        # Hand-added locks live outside the catalog, so they are stitched in
+        # here — only in the priorities view, and only when no belt filter is
+        # on (they have no belt). Same 8-field row shape as the catalog query.
+        self._locks_custom_hidden = 0
+        if mode == "My priorities":
+            customs = custom_lock_rows(conn)
+            if belt in ("", "All belts"):
+                # FIRST, not appended: the 2000-row display cap truncates the
+                # tail, and a hand-added lock must never be the thing dropped.
+                rows = [(nm, None, None, None, None,
+                         CUSTOM_ID_PREFIX + k, None, None)
+                        for k, nm in customs] + list(rows)
+            else:
+                # they have no belt, so a belt filter excludes them — say so
+                self._locks_custom_hidden = len(customs)
         conn.close()
         if find:
             ff = _fold(find)
             rows = [r for r in rows if ff in _fold(r[0])]
+        # The table displays at most 2000 rows. Remember whether that cap
+        # actually bit — "did it?" cannot be re-derived downstream, because the
+        # hunt works on DISTINCT NAMES and the catalog repeats names across
+        # belts, so 2000 rows can be fewer than 2000 names.
+        self._locks_view_capped = len(rows) > 2000
         rows = rows[:2000]
         # apply the current header sort: rows are
         # (name, belt, page, image, status, id, belt_full, owner_count)
@@ -10066,24 +10983,60 @@ class LockHunter(tk.Tk):
         self._locks_belts = {}
         self._locks_ids = {}
         self._locks_owncounts = {}
+        restore = []
+        shown_names = set()
         for i, (name, belt_v, page, image_url, status, lock_id, belt_full_v,
                 own_cnt) in enumerate(rows):
             owned = "\u2714" if status == "own" else ""
             wished = "\u2714" if status == "wishlist" else ""
+            # A hand-added lock is filed under NO belt \u2014 not even Unranked \u2014
+            # so its Belt cell is left blank like any other unknown value. It
+            # lives outside the catalog entirely, so it cannot reach the belt
+            # counts, the "% of the catalog owned" bar, or the Owned/Wishlist
+            # totals in the top-right corner.
             disp = _disp_belt(belt_v, belt_full_v)
             cnt = _rarity_stars(own_cnt) if own_cnt is not None else ""
+            is_pri = lock_id in pri_ids
             iid = self.locks_tree.insert(
                 "", "end",
-                values=(name, disp or "\u2014", cnt, owned, wished, ""),
-                tags=("even" if i % 2 else "odd",))
+                values=(name, disp or "\u2014", cnt, owned, wished,
+                        "\u2605" if is_pri else "", ""),
+                tags=(("even" if i % 2 else "odd"),) +
+                     (("pri",) if is_pri else ()))
             self._locks_pages[iid] = page
             self._locks_names[iid] = name
             self._locks_images[iid] = image_url
             self._locks_belts[iid] = disp
             self._locks_ids[iid] = lock_id
             self._locks_owncounts[iid] = own_cnt
-        self.locks_count_var.set(f"{len(rows)} locks")
+            shown_names.add(name)
+            if lock_id in keep_sel:
+                restore.append(iid)
+        # Exactly what "Hunt these locks" would search with nothing picked.
+        # Must mirror _batch_hunt_names EXACTLY: distinct NAMES, and ownership
+        # judged by NAME (not by this row's status) — the catalog repeats a
+        # name across belts, and you can own one twin and not the other.
+        if mode in ("Locks I own", "My priorities"):
+            self._locks_huntable_count = len(shown_names)
+        else:
+            self._locks_huntable_count = len(shown_names
+                                             - self._owned_lock_names())
+        if restore:
+            self.locks_tree.selection_set(*restore)
+            self.locks_tree.see(restore[0])
+        # Say what the batch button means, not just how many rows there are:
+        # "900 locks" next to "Hunt all 500 shown" read as a contradiction.
+        n = len(rows)
+        hunt = getattr(self, "_locks_huntable_count", n)
+        txt = f"{n} lock" + ("" if n == 1 else "s")
+        if hunt != n:
+            txt += f"  ·  {n - hunt} already owned"
+        hidden = getattr(self, "_locks_custom_hidden", 0)
+        if hidden:
+            txt += f"  ·  {hidden} of your own hidden (no belt)"
+        self.locks_count_var.set(txt)
         self._update_locks_sort_indicator()
+        self._sync_batch_hunt_button()
 
     def _sort_locks(self, col):
         """Header click: sort the lock database. 'Lock' sorts by name (A→Z,
@@ -10110,7 +11063,13 @@ class LockHunter(tk.Tk):
         if sel:
             page = getattr(self, "_locks_pages", {}).get(sel[0])
             if page:
-                webbrowser.open(page)
+                open_url(page)
+
+    def _on_locks_selection(self, _evt=None):
+        """Row picks changed: keep the batch-hunt button honest about what it
+        would search, then load the preview image."""
+        self._sync_batch_hunt_button()
+        self._on_locks_row_selected()
 
     def _on_locks_row_selected(self, _evt=None):
         if not HAVE_PIL:
@@ -10126,9 +11085,22 @@ class LockHunter(tk.Tk):
         own_cnt = getattr(self, "_locks_owncounts", {}).get(iid)
         img_url = getattr(self, "_locks_images", {}).get(iid)
         page_url = getattr(self, "_locks_pages", {}).get(iid)
+        # Already showing this exact lock, with the same picture? Don't
+        # re-fetch. Keyed on the lock ID (and image URL), NOT the name: the
+        # catalog repeats names across belts, and those twins have different
+        # belts, rarities and photos.
+        key = (getattr(self, "_locks_ids", {}).get(iid), img_url, page_url)
+        if (key == getattr(self, "_locks_thumb_key", None)
+                and getattr(self, "_locks_thumb_ref", None) is not None):
+            return
+        self._locks_thumb_key = key
         self._locks_thumb_current = name
         self._locks_thumb_ref = None
         self.locks_thumb_name.set(name)
+        if str(key[0] or "").startswith(CUSTOM_ID_PREFIX):
+            self.locks_thumb_belt.set("your own entry — not in the LPU catalog")
+            self.locks_thumb_label.config(image="", text="no image")
+            return
         belt_txt = f"{belt_v} belt" if belt_v else ""
         if own_cnt is not None:
             belt_txt += ("  \u00b7  " if belt_txt else "") \
@@ -10216,7 +11188,16 @@ class LockHunter(tk.Tk):
         if not iid:
             return
         if iid not in self.locks_tree.selection():
+            # Right-clicking outside the picks collapses them to this one row
+            # (standard behaviour) — but say so, because silently turning 43
+            # picks into 1 is exactly how a big hunt shrinks to nothing.
+            dropped = len(self.locks_tree.selection())
             self.locks_tree.selection_set(iid)
+            if dropped > 1:
+                self.status.set(
+                    f"Dropped your {dropped} picked locks — you right-clicked "
+                    f"a row outside them. This menu now applies to this lock "
+                    f"only.")
         name = getattr(self, "_locks_names", {}).get(iid)
         if not name:
             return
@@ -10225,16 +11206,139 @@ class LockHunter(tk.Tk):
                        bd=0)
         menu.add_command(label=f"Search for “{name}”",
                          command=lambda: self._search_lock_from_locks_tab(name))
-        n_sel = len(self.locks_tree.selection())
+        sel = self.locks_tree.selection()
+        n_sel = len(sel)
         if n_sel > 1 and not getattr(self, "_wishlist_hunt_running", False):
             menu.add_command(label=f"Hunt the {n_sel} selected locks",
                              command=self._start_batch_hunt)
-        menu.add_command(label="Open LPU page",
-                         command=lambda: self._locks_open_page(None))
+        # Priority toggle. Already-all-priority selections offer to remove;
+        # anything else offers to mark (which also tidies a mixed selection
+        # into all-priority).
+        ids = [i for i in (getattr(self, "_locks_ids", {}).get(x) for x in sel)
+               if i]
+        if ids:
+            pri = priority_lock_ids()
+            all_pri = all(i in pri for i in ids)
+            n_custom = sum(1 for i in ids if i.startswith(CUSTOM_ID_PREFIX))
+            what = "lock" if len(ids) == 1 else f"{len(ids)} locks"
+            menu.add_separator()
+            if all_pri:
+                lab = f"★  Remove {what} from priorities"
+                if n_custom:
+                    # a hand-added lock exists ONLY as a priority, so removing
+                    # it deletes it — say so, and say HOW MANY
+                    lab += (" (deletes your own entry)" if n_custom == 1
+                            else f" (deletes {n_custom} of your own entries)")
+                menu.add_command(
+                    label=lab,
+                    command=lambda v=ids: self._set_priority(v, False))
+            else:
+                menu.add_command(label=f"★  Mark {what} as priority",
+                                 command=lambda v=ids: self._set_priority(v, True))
+        # only real catalog locks have an LPU page
+        if not all(str(i).startswith(CUSTOM_ID_PREFIX) for i in ids) or not ids:
+            menu.add_command(label="Open LPU page",
+                             command=lambda: self._locks_open_page(None))
         try:
             menu.tk_popup(evt.x_root, evt.y_root)
         finally:
             menu.grab_release()
+
+    def _set_priority(self, lock_ids, on):
+        """Right-click handler: mark/unmark priority locks, then repaint the
+        Locks tab and the results (priority rows are blue and float to the
+        top of the results table)."""
+        n = set_priority_locks(lock_ids, on)
+        self._priority_names = None          # invalidate the results cache
+        self._refresh_locks_table()
+        self._refresh_table()
+        if n is None:
+            self.status.set("Couldn't save that — the database didn't accept "
+                            "the change. See the log.")
+            messagebox.showerror(
+                "Lock Hunter",
+                "Couldn't update your priority locks — the database refused "
+                "the write.\n\nNothing was changed. If Lock Hunter is open in "
+                "another window, close it and try again.")
+            return
+        # Report what CHANGED, with no arithmetic against what was asked for:
+        # a mark can expand to a same-named twin, so "asked minus changed" is
+        # not "how many were already priorities".
+        if n:
+            self.status.set(f"{n} lock(s) added to your priorities." if on
+                            else f"{n} lock(s) removed from your priorities.")
+        else:
+            self.status.set("Those were already priorities." if on
+                            else "None of those were priorities.")
+
+    def _add_custom_priority(self):
+        """'Add to priority' next to the Find box: put a lock that isn't in
+        the LPU catalog onto the priority list so it gets hunted too."""
+        typed = self.custom_lock_var.get().strip()
+        outcome, detail = add_custom_lock(typed)
+        if outcome is None:
+            messagebox.showerror(
+                "Lock Hunter",
+                "Couldn't save that lock — the database refused the write.\n\n"
+                "Nothing was changed.")
+            return
+        if outcome == "empty":
+            self.status.set("Type a lock name first, then click "
+                            "“Add to priority”.")
+            return
+        if outcome == "catalog":
+            # it IS an LPU lock — prioritise the real thing rather than
+            # creating a look-alike that would never match its photo or rarity
+            ids = catalog_ids_for_name(detail)
+            if not ids:
+                # NEVER fall through to the "added" message: nothing is stored
+                self.status.set(
+                    f"Couldn't add “{detail}” — it's in the LPU catalog but "
+                    f"the database wouldn't give me its entry. Try again.")
+                return
+            self.custom_lock_var.set("")
+            self._set_priority(ids, True)
+            self.status.set(
+                f"“{detail}” is in the LPU catalog — added the real lock "
+                f"to your priorities.")
+            return
+        self._priority_names = None
+        self.custom_lock_var.set("")
+        self._refresh_locks_table()
+        self._refresh_table()
+        if outcome == "exists":
+            self.status.set(f"“{detail}” is already on your priority list.")
+        else:
+            self.status.set(
+                f"Added “{detail}” to your priorities. It isn't in the LPU "
+                f"catalog, so it only shows under “Show: My priorities”.")
+
+    def _priority_name_set(self):
+        """Folded names of priority locks, cached between refreshes because
+        _refresh_table runs on every filter keystroke. A read failure is NOT
+        cached — otherwise one hiccup during startup would silently switch the
+        blue highlighting off for the rest of the session."""
+        names = getattr(self, "_priority_names", None)
+        if names is None:
+            names = priority_lock_names()
+            if names is None:
+                return set()          # couldn't read; try again next refresh
+            self._priority_names = names
+        return names
+
+    def _debounced_refresh_table(self, delay=250):
+        """Coalesce rapid refresh requests (typing in the Filter box, a hunt
+        posting one 'refresh_table' per lock) into a single redraw."""
+        after_id = getattr(self, "_refresh_after", None)
+        if after_id:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        def _go():
+            self._refresh_after = None
+            self._refresh_table()
+        self._refresh_after = self.after(delay, _go)
 
     def _toggle_lock_filter(self):
         """'Lock results only' is now a reversible DISPLAY filter (like 'ships
@@ -10669,8 +11773,9 @@ class LockHunter(tk.Tk):
     def _batch_hunt_names(self):
         """What 'Hunt these locks' would search right now: the hand-picked
         selection if any rows are selected, otherwise every lock in the
-        current filtered view — minus locks already owned, unless the view IS
-        'Locks I own' (then hunting owned locks is clearly intentional).
+        current filtered view — minus locks already owned, unless the view is
+        'Locks I own' or 'My priorities' (in both, hunting locks you own is
+        clearly intentional).
         Returns (names, human description) — names deduped, view order."""
         nmap = getattr(self, "_locks_names", {})
         def _dedup(seq):
@@ -10682,7 +11787,19 @@ class LockHunter(tk.Tk):
             return out
         sel = _dedup(nmap.get(i) for i in self.locks_tree.selection())
         if sel:
-            return sel, f"the {len(sel)} selected lock(s)"
+            # Picked rows win over the view — but say so LOUDLY and name them
+            # when they're only part of what's on screen, so a stray click
+            # can't quietly shrink a 43-lock hunt down to one.
+            total = len(self.locks_tree.get_children())
+            listed = ", ".join(f"“{n}”" for n in sel[:6])
+            if len(sel) > 6:
+                listed += f" … (+{len(sel) - 6} more)"
+            desc = f"ONLY the {len(sel)} lock(s) you picked:\n{listed}"
+            if total > len(sel):
+                desc += (f"\n\nThe other {total - len(sel)} lock(s) on screen "
+                         f"will NOT be searched. Say No, then press Esc in the "
+                         f"list to drop the picks and hunt all {total}.")
+            return sel, desc
         shown = _dedup(nmap.get(i) for i in self.locks_tree.get_children())
         mode = self.locks_show_var.get()
         belt = self.locks_belt_var.get()
@@ -10691,18 +11808,21 @@ class LockHunter(tk.Tk):
         if find:
             view += f", matching “{find}”"
         # the Locks table displays at most 2000 rows — if the view hit that
-        # cap, say so instead of silently hunting only part of it
+        # cap, say so instead of silently hunting only part of it. Uses the
+        # flag set by the refresh, because names are deduped here and the
+        # catalog repeats names, so len(shown) can be < 2000 on a capped view.
         capped = ("\n(NOTE: the view is capped at 2000 rows — narrow the "
-                  "filter to hunt the rest)" if len(shown) >= 2000 else "")
-        if mode != "Locks I own":
+                  "filter to hunt the rest)"
+                  if getattr(self, "_locks_view_capped", False) else "")
+        if mode not in ("Locks I own", "My priorities"):
             owned = self._owned_lock_names()
             kept = [n for n in shown if n not in owned]
             skipped = len(shown) - len(kept)
-            desc = f"all {len(kept)} lock(s) shown ({view})"
+            desc = f"all {len(kept)} lock(s) shown ({view})?"
             if skipped:
                 desc += f"\n({skipped} you already own will be skipped)"
             return kept, desc + capped
-        return shown, f"all {len(shown)} lock(s) shown ({view})" + capped
+        return shown, f"all {len(shown)} lock(s) shown ({view})?" + capped
 
     def _toggle_batch_hunt(self):
         if getattr(self, "_wishlist_hunt_running", False):
@@ -10718,8 +11838,11 @@ class LockHunter(tk.Tk):
             return
         names, desc = self._batch_hunt_names()
         if not names:
+            mode = self.locks_show_var.get()
             messagebox.showinfo(
                 "Lock Hunter",
+                "No locks to hunt — nothing is shown in the list."
+                if mode in ("Locks I own", "My priorities") else
                 "No locks to hunt — nothing is shown, or every lock shown is "
                 "already in your collection.")
             return
@@ -10728,11 +11851,22 @@ class LockHunter(tk.Tk):
                "found so far is kept.") if len(names) > 40 else ""
         if not messagebox.askyesno(
                 "Hunt these locks",
-                f"Search all listings for {desc}?\n\n"
+                f"Search all listings for {desc}\n\n"
                 "Uses the FREE search (eBay + ~46 marketplaces + Lock Bazaar, "
                 "no API credits) — results appear on the Search tab as they "
                 "arrive." + big):
             return
+        # Record the SCOPE, so a "why did it only search one lock?" question
+        # is answerable from the log alone.
+        try:
+            picked = len(self.locks_tree.selection())
+            log(f"Batch hunt: {len(names)} lock(s) — "
+                + (f"{picked} picked row(s)" if picked else
+                   f"the whole view (Show: {self.locks_show_var.get()}, "
+                   f"Belt: {self.locks_belt_var.get()}, "
+                   f"{len(self.locks_tree.get_children())} row(s) shown)"))
+        except Exception:
+            pass
         self._wishlist_hunt_running = True
         self._wishlist_hunt_cancel = False
         btn = getattr(self, "hunt_batch_btn", None)
@@ -10761,13 +11895,39 @@ class LockHunter(tk.Tk):
 
     def _sync_batch_hunt_button(self):
         """Restore the batch-hunt button to idle (mirrors
-        _sync_hunt_wishlist_button; left alone while a hunt is running)."""
+        _sync_hunt_wishlist_button; left alone while a hunt is running).
+
+        The LABEL states the scope, because picked rows silently override the
+        view: with rows picked it reads "Hunt 3 picked", otherwise
+        "Hunt all 43 shown". A stray click can no longer shrink a whole-list
+        hunt without the button saying so."""
         if getattr(self, "_wishlist_hunt_running", False):
             return
         b = getattr(self, "hunt_batch_btn", None)
-        if b is not None:
-            b.config(text="Hunt these locks")
-            b.set_enabled(True)
+        if b is None:
+            return
+        label = "Hunt these locks"
+        n_sel = 0
+        try:
+            # distinct NAMES, matching what _batch_hunt_names would hunt
+            _nm = getattr(self, "_locks_names", {})
+            n_sel = len({_nm.get(i) for i in self.locks_tree.selection()
+                         if _nm.get(i)})
+        except Exception:
+            pass
+        # NOT len(rows): the hunt works on distinct names and skips locks you
+        # already own in most views, so the row count would overstate it.
+        n_all = getattr(self, "_locks_huntable_count", 0)
+        if n_sel:
+            label = f"Hunt {n_sel} picked" if n_sel > 1 else "Hunt 1 picked lock"
+        elif n_all:
+            label = (f"Hunt all {n_all}" if n_all > 1
+                     else "Hunt the 1 lock")
+        b.config(text=label)
+        b.set_enabled(True)
+        cb = getattr(self, "clear_picks_btn", None)
+        if cb is not None:
+            cb.set_enabled(bool(n_sel))
 
     def _start_wishlist_hunt(self, new_only=False):
         if self.locks_show_var.get() not in ("All locks", "My wishlist"):
@@ -10955,23 +12115,33 @@ class LockHunter(tk.Tk):
                     s = str(it.get("site") or "?")
                     by_site[s] = by_site.get(s, 0) + 1
                 conn = None
+                # The baseline may only advance for listings that are ACTUALLY
+                # stored and committed. Recording a url we then failed to save
+                # marks it "seen last time", so "Only new searches" hides it
+                # for good and the user never learns it existed.
+                pending_urls = set()
                 try:
                     conn = db()
                     for it in results:
                         url = it.get("url", "")
-                        if url:
-                            all_urls.add(url)          # advance the baseline
                         if new_only and url and url in baseline:
-                            continue                   # seen last time -> hide
+                            if url:
+                                pending_urls.add(url)  # seen last time -> hide
+                            continue
                         try:
                             if _insert_listing_row(conn, lock_name, it):
                                 stored += 1
-                        except sqlite3.Error:
-                            pass
-                    _prune_listing_history(conn)
+                            if url:
+                                pending_urls.add(url)
+                        except sqlite3.Error as e:
+                            log(f"Could not store a listing for "
+                                f"{lock_name}: {e}")
                     conn.commit()
-                except sqlite3.Error:
-                    pass
+                    all_urls |= pending_urls           # committed -> baseline
+                except sqlite3.Error as e:
+                    log(f"Saving results for {lock_name} failed, so none of "
+                        f"them were recorded as seen: {e}")
+                    stored = 0
                 finally:
                     if conn is not None:
                         conn.close()
@@ -11010,6 +12180,15 @@ class LockHunter(tk.Tk):
         except Exception as ex:
             self.q.put(("status", log(f"{status_tag} hunt FAILED: {ex}")))
         finally:
+            # Cap the price history ONCE for the whole sweep. Running it per
+            # lock cost two full scans of the table 250 times a hunt.
+            try:
+                _c = db()
+                _prune_listing_history(_c)
+                _c.commit()
+                _c.close()
+            except sqlite3.Error:
+                pass
             try:
                 # one verdict for the whole sweep, weighted by how many
                 # locks actually got searched (a cancelled hunt that only
@@ -11173,6 +12352,12 @@ class LockHunter(tk.Tk):
         self._thumb_ref = None
         self.thumb_label.config(image="", text="loading…")
         if not row:
+            # not an LPU lock — could be a hand-added priority or free text;
+            # keep the name so the search still reads sensibly
+            if name and _fold(name) in {f for f, _n in custom_lock_rows()}:
+                self.belt_var.set("your own entry — not in the LPU catalog")
+                self.thumb_label.config(image="", text="no image")
+                return
             self.name_var.set("")
             self.thumb_label.config(image="", text="select a lock")
             return
@@ -11238,7 +12423,7 @@ class LockHunter(tk.Tk):
         belt_val = belt.get() if belt else "All belts"
         if belt_val and belt_val != "All belts":
             url += "&belt=" + urllib.parse.quote_plus(belt_val)
-        webbrowser.open(url)
+        open_url(url)
 
     def _fetch_thumb(self, url, name):
         try:
@@ -11259,7 +12444,7 @@ class LockHunter(tk.Tk):
 
     def _open_lpu(self):
         if getattr(self, "_page_url", None):
-            webbrowser.open(self._page_url)
+            open_url(self._page_url)
 
     # ---- profile import
     def _start_profile_import(self):
@@ -11287,6 +12472,7 @@ class LockHunter(tk.Tk):
         save_cfg(self.cfg)
         self.profile_btn.config(state="disabled")
         self.profile_btn.config(text="Working…")
+        self._profile_running = True
         self.status.set("Reading your LPU profile… this can take a few seconds.")
         threading.Thread(target=self._profile_worker, args=(url,), daemon=True).start()
 
@@ -11311,6 +12497,7 @@ class LockHunter(tk.Tk):
                 "Profile not loaded",
                 f"Your LPU profile could not be loaded — {ex}")))
         finally:
+            self._profile_running = False
             self.q.put(("profile_reset", None))
             self.q.put(("profile_done", None))
 
@@ -11321,6 +12508,7 @@ class LockHunter(tk.Tk):
         url = (self.cfg.get("profile_url") or "").strip()
         if not url:
             return
+        self._profile_running = True
         threading.Thread(target=self._auto_profile_worker, args=(url,),
                          daemon=True).start()
 
@@ -11335,12 +12523,15 @@ class LockHunter(tk.Tk):
             self.q.put(("profile_done", None))
         except Exception as ex:
             self.q.put(("status", log(f"Profile auto-refresh skipped: {ex}")))
+        finally:
+            self._profile_running = False
 
     def _start_sync(self):
         if str(self.sync_btn["state"]) == "disabled":
             return
         self.sync_btn.config(state="disabled")
         self.sync_btn.config(text="Working…")
+        self._sync_running = True
         self.status.set("Downloading the LPU lock catalog… this can take 10–20 seconds.")
         threading.Thread(target=self._sync_worker, daemon=True).start()
 
@@ -11355,6 +12546,7 @@ class LockHunter(tk.Tk):
         except Exception as ex:
             self.q.put(("status", log(f"LPU sync failed: {ex}")))
         finally:
+            self._sync_running = False
             self.q.put(("sync_reset", None))
             self.q.put(("sync_done", None))
 
@@ -11414,7 +12606,7 @@ class LockHunter(tk.Tk):
                 urllib.parse.quote(body))
         opened = False
         try:
-            opened = webbrowser.open(link)
+            opened = open_url(link)
         except Exception:
             opened = False
         if clip_ok:
@@ -11471,7 +12663,9 @@ class LockHunter(tk.Tk):
         win = tk.Toplevel(self)
         win.title("Getting a Claude API key")
         win.configure(bg=self.C_PANEL)
-        win.geometry("560x420")
+        win.geometry("560x560")
+        win.minsize(480, 420)
+        win.resizable(True, True)
         win.transient(self); win.grab_set()
         tk.Label(win, text="How to get your Claude API key",
                  bg=self.C_PANEL, fg=self.C_ACCENT,
@@ -11494,19 +12688,42 @@ class LockHunter(tk.Tk):
             "'Save key'. It's stored locally on your computer only.\n\n"
             "Keep your key private — anyone with it can spend your credit."
         )
+        # Buttons FIRST, anchored to the bottom, so they can never be the
+        # thing that gets clipped — at the old fixed 560x420 the window needed
+        # 510px and neither button was ever drawn, leaving a modal dialog with
+        # no way out except the title bar.
+        btns = tk.Frame(win, bg=self.C_PANEL)
+        btns.pack(side="bottom", anchor="w", padx=20, pady=16)
         msg = tk.Label(win, text=steps, bg=self.C_PANEL, fg=self.C_TEXT,
                        font=("Segoe UI", 10), justify="left", wraplength=520,
                        anchor="w")
         msg.pack(anchor="w", padx=20)
-        btns = tk.Frame(win, bg=self.C_PANEL)
-        btns.pack(anchor="w", padx=20, pady=16)
         FlatButton(btns, "Open the API keys page", kind="primary",
-                   command=lambda: webbrowser.open(
+                   command=lambda: open_url(
                        "https://console.anthropic.com/settings/keys")).pack(side="left")
         FlatButton(btns, "Close", kind="subtle",
                    command=win.destroy).pack(side="left", padx=(8, 0))
 
     def _clear_all(self):
+        # Background workers started at launch (catalog sync at +1.5s, silent
+        # profile refresh at +2.6s) would write the catalog and the profile
+        # link straight back after the wipe. Refuse while any of them is in
+        # flight rather than pretending to have erased everything.
+        busy = [n for n, flag in (
+            ("a search", getattr(self, "_search_running", False)),
+            ("a hunt", getattr(self, "_wishlist_hunt_running", False)),
+            ("the catalog update", getattr(self, "_sync_running", False)),
+            ("the profile import", getattr(self, "_profile_running", False)),
+            ("the owner scan", getattr(self, "_owners_loading", False)),
+        ) if flag]
+        if busy:
+            messagebox.showinfo(
+                "Lock Hunter",
+                "Can't clear yet — " + " and ".join(busy) + " is still "
+                "running, and it would write data back straight afterwards."
+                "\n\nWait for it to finish (a few seconds after launch), "
+                "then try again.")
+            return
         # First confirmation
         if not messagebox.askyesno(
                 "Clear all?",
@@ -11528,11 +12745,20 @@ class LockHunter(tk.Tk):
         # 1) empty the database tables
         try:
             conn = db()
+            # listing_history was missing here, so "Times seen", "Typical
+            # price" and every deal flag survived a reset that promised a
+            # clean slate.
             for tbl in ("locks", "my_collection", "listings", "searches",
-                        "site_health"):
+                        "site_health", "priority_locks", "custom_locks",
+                        "listing_history"):
                 conn.execute(f"DELETE FROM {tbl}")
             self._broken_cache = None      # forget any red-site colouring
+            self._priority_names = None
             conn.commit()
+            try:
+                conn.execute("VACUUM")     # actually give the disk space back
+            except sqlite3.Error:
+                pass
             conn.close()
         except Exception as ex:
             errors.append(f"database: {ex}")
@@ -11553,12 +12779,38 @@ class LockHunter(tk.Tk):
             self._wl_baseline = set()
         except Exception as ex:
             errors.append(f"wishlist baseline: {ex}")
-        # 3) clear the saved profile + API key from config
+        # 2c) the other on-disk leftovers a "complete reset" has to include:
+        # the scraped roster of other collectors, the Bazaar baseline, the
+        # crash log, and the thumbnail cache.
+        for label, path in (
+                ("owners cache", _owners_cache_path()),
+                ("Bazaar baseline", os.path.join(APP_DIR, "bazaar_seen.json")),
+                ("crash log", CRASH_LOG_PATH)):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as ex:
+                errors.append(f"{label}: {ex}")
         try:
-            for k in ("api_key", "profile_url", "profile_uid", "profile_synced",
-                      "lpu_synced"):
-                self.cfg.pop(k, None)
+            if os.path.isdir(IMG_DIR):
+                for fn in os.listdir(IMG_DIR):
+                    try:
+                        os.remove(os.path.join(IMG_DIR, fn))
+                    except OSError:
+                        pass
+        except Exception as ex:
+            errors.append(f"image cache: {ex}")
+        # 3) clear the saved profile + API key from config. Keep ONLY the
+        # window geometry — everything else is user data or a stale marker.
+        try:
+            keep = {k: self.cfg[k] for k in
+                    ("win_geometry", "win_zoomed") if k in self.cfg}
+            self.cfg.clear()
+            self.cfg.update(keep)
             save_cfg(self.cfg)
+            _set_shipto_country("")
+            if hasattr(self, "country_var"):
+                self.country_var.set("(not set)")
         except Exception as ex:
             errors.append(f"settings: {ex}")
         # 4) reset in-memory state + UI
@@ -11586,6 +12838,35 @@ class LockHunter(tk.Tk):
                 "Everything has been reset. Enter your API key and profile "
                 "again, then click 'Update LPU catalog' to reload locks.")
 
+    def _fit_status_text(self):
+        """Trim the status line to the width it actually has. Tk labels do not
+        elide, so a 200-character message simply grew the label and shoved the
+        Export / Help / Check-for-updates links off the window — and those
+        links are the only way to reach those features."""
+        lbl = getattr(self, "status_label", None)
+        if lbl is None:
+            return
+        try:
+            avail = lbl.winfo_width()
+            if avail <= 1:
+                return
+            full = self.status.get()
+            font = tkfont.Font(font=lbl.cget("font"))
+            if font.measure(full) <= avail - 28:
+                if lbl.cget("text") != full:
+                    lbl.config(text=full)
+                return
+            lo, hi = 0, len(full)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if font.measure(full[:mid] + " …") <= avail - 28:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            lbl.config(text=full[:lo].rstrip() + " …")
+        except Exception:
+            pass
+
     def _show_scan_overlay(self, on):
         if not hasattr(self, "scan_overlay"):
             return
@@ -11599,6 +12880,24 @@ class LockHunter(tk.Tk):
             pass
 
     def _start_search(self):
+        # Every search path funnels through here — the button, Enter, the
+        # Locks-tab right-click, the Hunt-next double-click. They ALL have to
+        # respect the one-writer rule: `listings` is cleared and rewritten by
+        # whoever runs, so a second search on top of a hunt (or of another
+        # search) silently deletes results the user is still looking at.
+        if getattr(self, "_wishlist_hunt_running", False):
+            messagebox.showinfo(
+                "Lock Hunter",
+                "A hunt is already running — it would lose its results if a "
+                "new search started now.\n\nCancel the hunt first (the button "
+                "on the Locks tab), or wait for it to finish.")
+            return
+        if getattr(self, "_search_running", False):
+            messagebox.showinfo(
+                "Lock Hunter",
+                "A search is already running. Wait for it to finish — its "
+                "results would be thrown away if a second one started now.")
+            return
         lock_name = self.lock_var.get().strip()
         if not lock_name:
             messagebox.showwarning("Lock Hunter", "Enter or pick a lock name.")
@@ -11609,6 +12908,7 @@ class LockHunter(tk.Tk):
                 "Enter your Claude API key first — or untick 'Use AI web "
                 "search' for a free eBay + Bazaar search.")
             return
+        self._search_running = True
         self.search_btn.config(state="disabled")
         # clear the old results from view and show the scanning message
         self._refresh_table()
@@ -11646,7 +12946,14 @@ class LockHunter(tk.Tk):
                 self.deep_var.get(), belt,
                 sales_map.get(self.sales_var.get(), "Both"),
                 self.ai_var.get(), use_fb)
-        threading.Thread(target=self._worker, args=args, daemon=True).start()
+        try:
+            threading.Thread(target=self._worker, args=args, daemon=True).start()
+        except Exception as ex:
+            # never strand the one-writer flag if the thread can't start
+            self._search_running = False
+            self.search_btn.config(state="normal")
+            self._show_scan_overlay(False)
+            messagebox.showerror("Lock Hunter", f"Couldn't start the search: {ex}")
 
     def _kick_shipto_probe(self):
         """Start (once) the background job that opens each not-yet-checked eBay
@@ -11745,10 +13052,11 @@ class LockHunter(tk.Tk):
         attempts = {}     # {site: locks it was asked about}
         try:
             conn = db()
-            # A new search replaces ALL previous results, so clear the whole
-            # listings table (not just this lock's rows).
-            conn.execute("DELETE FROM listings")
-            conn.commit()
+            # A new search replaces ALL previous results — but NOT yet. The
+            # clear happens in the same transaction as the insert, at the very
+            # end, so a failed/abandoned scan (or closing the window mid-sweep,
+            # which hard-exits) leaves the previous results intact instead of
+            # an empty table.
             cur = conn.execute(
                 "INSERT INTO searches(lock_name,condition,exclude_pickup,results,started_at,status)"
                 " VALUES(?,?,?,?,?,?)",
@@ -11915,6 +13223,10 @@ class LockHunter(tk.Tk):
                     f"Verification removed {before - len(results)} dead/ended "
                     f"listing(s); {len(results)} live.")))
             kept = 0
+            # ONE transaction: swap the old results for the new ones. Either
+            # the user ends up with this search's results or with the ones
+            # they already had — never with an empty table.
+            conn.execute("DELETE FROM listings")
             for it in results:
                 # Pickup/meetup-only rows (shipping='no') are STORED now — the
                 # "Exclude pickup / meetup-only" box hides them at display time
@@ -11922,8 +13234,8 @@ class LockHunter(tk.Tk):
                 try:
                     _insert_listing_row(conn, lock_name, it)
                     kept += 1
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as e:
+                    log(f"Could not store a listing for {lock_name}: {e}")
             _prune_listing_history(conn)
             conn.execute("UPDATE searches SET results=?, finished_at=?, status=? WHERE id=?",
                          (kept, datetime.datetime.now().isoformat(timespec="seconds"), "ok", sid))
@@ -11976,6 +13288,7 @@ class LockHunter(tk.Tk):
                 if kind == "status":
                     self.status.set(payload)
                 elif kind == "done":
+                    self._search_running = False
                     self.search_btn.config(state="normal")
                     self._show_scan_overlay(False)
                     self._refresh_table()
@@ -11991,7 +13304,8 @@ class LockHunter(tk.Tk):
                     if hasattr(self, "scan_overlay"):
                         self.scan_overlay.config(text=payload)
                 elif kind == "refresh_table":
-                    self._refresh_table()
+                    # a 250-lock hunt posts one of these per lock; coalesce
+                    self._debounced_refresh_table(400)
                 elif kind == "wishlist_hunt_done":
                     self._show_scan_overlay(False)
                     self._refresh_table()
@@ -12003,19 +13317,27 @@ class LockHunter(tk.Tk):
                 elif kind == "profile_reset":
                     self.profile_btn.config(text="Update profile")
                 elif kind == "sync_done":
+                    self._priority_names = None
                     self.sync_btn.config(state="normal")
                     self._reload_lock_names()
                     if hasattr(self, "locks_tree"):
                         self._refresh_locks_table()
                     if hasattr(self, "coll_belts"):
                         self._refresh_collection_tab()
+                    # a catalog sync can rename locks — repaint the results so
+                    # the blue priority rows aren't left stale
+                    if hasattr(self, "tree"):
+                        self._refresh_table()
                 elif kind == "profile_done":
+                    self._priority_names = None
                     self.profile_btn.config(state="normal")
                     self._reload_lock_names()
                     if hasattr(self, "locks_tree"):
                         self._refresh_locks_table()
                     if hasattr(self, "coll_belts"):
                         self._refresh_collection_tab()
+                    if hasattr(self, "tree"):
+                        self._refresh_table()
                 elif kind == "compare_results":
                     who, their_total, their_wish_total, rows = payload
                     self._compare_running = False
@@ -12106,7 +13428,7 @@ class LockHunter(tk.Tk):
                             f"A newer version is available: v{latest}\n"
                             f"(You have v{VERSION}.)\n\n"
                             "Open the download page now?"):
-                        webbrowser.open(GITHUB_RELEASES_PAGE)
+                        open_url(GITHUB_RELEASES_PAGE)
                 elif kind == "popup_error":
                     title, body = payload
                     messagebox.showerror(title, body)
@@ -12427,7 +13749,7 @@ class LockHunter(tk.Tk):
             try:
                 os.startfile(path)   # Windows: open in Excel
             except Exception:
-                webbrowser.open("file://" + path.replace("\\", "/"))
+                open_url("file://" + path.replace("\\", "/"))
 
     def _refresh_table(self):
         for row in self.tree.get_children():
@@ -12603,11 +13925,35 @@ class LockHunter(tk.Tk):
             valued.sort(key=keyval, reverse=self._sort_rev)
             rows = valued + blank
 
+        # Priority locks float to the TOP, whatever else the table is ordered
+        # by — that's the point of flagging one. Within the priority block and
+        # within the rest, the order chosen above is preserved (sorted() is
+        # stable), so a column sort still sorts both groups.
+        pri_names = self._priority_name_set()
+        _pf = {}
+        def _isp(nm):
+            """0 for a priority lock, 1 otherwise — computed once per distinct
+            name. Matches on the accent-blind fold OR the plain case-folded
+            key, so a lock named only in Japanese or Cyrillic (which folds to
+            nothing) is still recognised."""
+            nm = nm or ""
+            v = _pf.get(nm)
+            if v is None:
+                f = _fold(nm)
+                v = _pf[nm] = 0 if ((f and f in pri_names)
+                                    or _pkey(nm) in pri_names) else 1
+            return v
+        if pri_names:
+            rows = sorted(rows, key=lambda r: _isp(r[0]))
+
         for i, rec in enumerate(rows):
             price_disp = " ".join(p for p in (str(rec[2] or "").strip(),
                                               str(rec[3] or "").strip()) if p)
-            if not price_disp:
-                price_disp = "unknown"   # listed anyway — price not readable
+            if not price_disp or not str(rec[2] or "").strip():
+                # listed anyway — price not readable. A currency with no
+                # amount used to render as a bare "AUD" / "CAD", which reads
+                # like a truncated price rather than a missing one.
+                price_disp = "unknown"
             if usd_on and rates:
                 u = _usd_estimate(rec[2], rec[3], rates)
                 _amt, cur = _parse_price(rec[2], rec[3])
@@ -12627,10 +13973,15 @@ class LockHunter(tk.Tk):
             # titles" is on and fetched) or a foreign-term gloss — display
             # only; filters used the raw title above.
             self._visible_titles.append(rec[1] or "")
-            vals = (rec[0], self._display_title(rec[1]), price_disp,
-                    rec[5], rec[6], rar)
+            # `or ""` on every cell: a NULL location rendered as the literal
+            # word "None" in the Location column.
+            vals = (rec[0] or "", self._display_title(rec[1]), price_disp,
+                    rec[5] or "", rec[6] or "", rar)
             stripe = "even" if i % 2 else "odd"
             tags = (stripe, "deal") if is_deal else (stripe,)
+            if pri_names and _isp(rec[0]) == 0:
+                # priority beats the deal colour — it is the stronger signal
+                tags = (stripe, "priority")
             iid = self.tree.insert("", "end", values=vals, tags=tags)
             self._row_urls[iid] = rec[9]
             self._row_images[iid] = (rec[10] or "", rec[0] or "")
@@ -12765,7 +14116,7 @@ class LockHunter(tk.Tk):
         if sel:
             url = getattr(self, "_row_urls", {}).get(sel[0])
             if url:
-                webbrowser.open(url)
+                open_url(url)
 
     def _results_context_menu(self, evt):
         """Right-click menu on the search results table: open, copy link, or
@@ -14035,6 +15386,8 @@ _EMBEDDED_ASSETS = {
 
 
 if __name__ == "__main__":
+    _leave_bundle_dir()
+    _sweep_stale_bundle_dirs()
     try:
         LockHunter().mainloop()
         # Normal exit (the user closed the window). Background scraping runs on
