@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "5.1.2"
+VERSION = "5.1.3"
 
 
 
@@ -4619,6 +4619,73 @@ def db():
         pass
     return conn
 
+def hide_listings(urls, conn=None):
+    """'Never show again' for SPECIFIC listings: persist their canonical URLs
+    so the results view and the export skip them from now on — including when
+    a future scan finds the very same listing again (same canonical URL ->
+    same row, still filtered). Only the exact listings given are hidden;
+    other listings of the same lock are untouched. Returns how many were
+    recorded. Undone only by clear_hidden() ("Clear all", Locks tab)."""
+    urls = [_canon_listing_url(u) for u in urls if str(u or "").strip()]
+    urls = [u for u in urls if u]
+    if not urls:
+        return 0
+    own = conn is None
+    if own:
+        conn = db()
+    try:
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        rows = []
+        for u in urls:
+            r = conn.execute(
+                "SELECT lock_name,title,site FROM listings WHERE url=?",
+                (u,)).fetchone()
+            rows.append((u, (r[0] if r else "") or "", (r[1] if r else "") or "",
+                         (r[2] if r else "") or "", now))
+        conn.executemany(
+            "INSERT OR REPLACE INTO hidden_listings"
+            "(url,lock_name,title,site,hidden_at) VALUES(?,?,?,?,?)", rows)
+        if own:
+            conn.commit()
+        return len(rows)
+    finally:
+        if own:
+            conn.close()
+
+
+def hidden_count(conn=None):
+    """How many listings are currently 'Never show again'."""
+    own = conn is None
+    if own:
+        conn = db()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM hidden_listings").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        if own:
+            conn.close()
+
+
+def clear_hidden(conn=None):
+    """'Clear all' (Locks tab): forget every 'Never show again' so those
+    listings appear in the results view and export again. Returns how many
+    were cleared."""
+    own = conn is None
+    if own:
+        conn = db()
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM hidden_listings").fetchone()[0]
+        conn.execute("DELETE FROM hidden_listings")
+        if own:
+            conn.commit()
+        return n
+    finally:
+        if own:
+            conn.close()
+
+
 def init_db():
     """Create tables if missing and run one-time migrations. Safe to call more
     than once, but intended to run just once at startup."""
@@ -4657,6 +4724,14 @@ def init_db():
         _lcols = [r[1] for r in conn.execute("PRAGMA table_info(listings)")]
         if "shipto" not in _lcols:
             conn.execute("ALTER TABLE listings ADD COLUMN shipto TEXT")
+        # 5.1.3: "Never show again" — specific listings the user permanently
+        # dismissed (right-click in results). The listing itself stays in
+        # `listings`/`listing_history`, so re-finds still dedupe and history
+        # stays honest; it is only FILTERED from the results view and the
+        # export, until "Clear all" on the Locks tab empties this table.
+        conn.execute("""CREATE TABLE IF NOT EXISTS hidden_listings(
+            url TEXT PRIMARY KEY, lock_name TEXT, title TEXT, site TEXT,
+            hidden_at TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS searches(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             lock_name TEXT, condition TEXT, exclude_pickup INTEGER,
@@ -10753,6 +10828,14 @@ class LockHunter(tk.Tk):
                  text="type any lock name and it joins your priority hunt",
                  bg=self.C_PANEL, fg=self.C_MUTE,
                  font=("Segoe UI", 9)).pack(side="left", padx=(10, 0))
+        # "Clear all" for the right-click "Never show again" hides: lives up
+        # here (Ferf's spec) so un-hiding is deliberate, away from the
+        # results table where an accidental click could flood old junk back.
+        self.clear_hidden_btn = FlatButton(
+            ctrl_custom, "Clear all ‘Never show again’ (0)",
+            command=self._clear_hidden_listings, kind="outline")
+        self.clear_hidden_btn.pack(side="right")
+        self._sync_hidden_button()
 
         # The four hunt buttons live on their OWN row. Packed into the filter
         # row they needed ~1500px of window before Tk stopped clipping them —
@@ -13581,8 +13664,10 @@ class LockHunter(tk.Tk):
         lock results only) — so the export matches exactly what you see."""
         # Pull the same rows the results table shows (same WHERE clauses as
         # _refresh_table, so hidden rows are not exported).
-        qy = ("SELECT lock_name,title,price,currency,site,url,seller,shipping,shipto"
-              " FROM listings WHERE 1=1")
+        qy = ("SELECT lock_name,title,price,currency,site,url,seller,shipping,"
+              "shipto,image_url FROM listings WHERE 1=1")
+        # match the results view: "Never show again" listings stay out
+        qy += " AND url NOT IN (SELECT url FROM hidden_listings)"
         params = []
         f = self.filter_var.get().strip()
         if f:
@@ -13679,8 +13764,11 @@ class LockHunter(tk.Tk):
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "Lock Search"
+            # "Image" carries the photo URL this app ALREADY scraped during
+            # the search — so downstream tools (Lock Lister) never have to
+            # re-fetch marketplace pages that bot-wall plain scripts.
             headers = ["Lock name", "Rarity", "Title", "Price", "Price (USD)",
-                       "Site", "Seller", "Listing"]
+                       "Site", "Seller", "Listing", "Image"]
             ws.append(headers)
             hdr_font = Font(bold=True, color="FFFFFF")
             hdr_fill = PatternFill("solid", fgColor="C58A2E")
@@ -13692,9 +13780,10 @@ class LockHunter(tk.Tk):
             link_font = Font(color="0563C1", underline="single")
 
             for rec in rows:
-                # rec now also carries shipping, shipto at [7], [8] (used only
-                # for the display-filter WHERE above) — take the first 7 here.
+                # rec also carries shipping/shipto at [7],[8] (display-filter
+                # WHERE only) and image_url at [9].
                 lock_name, title, price, currency, site, url, seller = rec[:7]
+                image_url = str(rec[9] or "") if len(rec) > 9 else ""
                 price_disp = " ".join(p for p in (str(price or "").strip(),
                                                   str(currency or "").strip())
                                       if p)
@@ -13728,9 +13817,11 @@ class LockHunter(tk.Tk):
                     link_cell.font = link_font
                 else:
                     link_cell.value = u
+                ws.cell(row=r, column=9,
+                        value=image_url if image_url.startswith("http") else "")
 
             # Reasonable column widths.
-            widths = [26, 10, 46, 16, 13, 16, 18, 18]
+            widths = [26, 10, 46, 16, 13, 16, 18, 18, 40]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
             ws.freeze_panes = "A2"
@@ -13759,6 +13850,9 @@ class LockHunter(tk.Tk):
         self._visible_titles = []   # raw titles on screen (for translation)
         qy = ("SELECT lock_name,title,price,currency,condition,site,"
               "location,shipping,found_at,url,image_url FROM listings WHERE 1=1")
+        # "Never show again" (right-click): those exact listings stay stored
+        # but never render, until Clear all (Locks tab) empties the table.
+        qy += " AND url NOT IN (SELECT url FROM hidden_listings)"
         params = []
         f = self.filter_var.get().strip()
         if f:
@@ -14142,6 +14236,13 @@ class LockHunter(tk.Tk):
             label=("Remove from results" if n <= 1
                    else f"Remove {n} from results"),
             command=self._remove_selected_results)
+        # "Never show again" is the permanent cousin of Remove: Remove prunes
+        # the row until the next scan re-finds it; this one filters that exact
+        # listing out of every future view/export until Clear all (Locks tab).
+        menu.add_command(
+            label=("Never show again" if n <= 1
+                   else f"Never show these {n} again"),
+            command=self._never_show_selected)
         try:
             menu.tk_popup(evt.x_root, evt.y_root)
         finally:
@@ -14193,6 +14294,77 @@ class LockHunter(tk.Tk):
         self.status.set(
             f"Removed {removed} result{'' if removed == 1 else 's'} "
             f"({remaining} remaining).")
+
+    def _never_show_selected(self):
+        """'Never show again' on the selected result row(s): those EXACT
+        listings (by canonical URL) stop appearing in the results view and
+        the export — now and after every future scan — until 'Clear all' on
+        the Locks tab. Only the selected listings are affected; other
+        listings of the same lock keep showing."""
+        sel = list(self.tree.selection())
+        if not sel:
+            return
+        urls = [self._row_urls.get(iid) for iid in sel]
+        urls = [u for u in urls if u]
+        if not urls:
+            return
+        try:
+            n = hide_listings(urls)
+        except sqlite3.Error as ex:
+            messagebox.showerror(
+                "Never show again", f"Couldn't save the hide(s): {ex}")
+            return
+        for iid in sel:
+            self._row_urls.pop(iid, None)
+            try:
+                self.tree.delete(iid)
+            except Exception:
+                pass
+        self._sync_hidden_button()
+        remaining = len(self.tree.get_children())
+        self.status.set(
+            f"Never showing {n} listing{'' if n == 1 else 's'} again "
+            f"({remaining} remaining).  Undo: Locks tab → Clear all.")
+
+    def _sync_hidden_button(self):
+        """Keep the Locks-tab 'Clear all' button honest: label carries the
+        live hidden count, and it's disabled when nothing is hidden."""
+        btn = getattr(self, "clear_hidden_btn", None)
+        if btn is None:
+            return
+        try:
+            n = hidden_count()
+        except Exception:
+            n = 0
+        btn.config(text=f"Clear all ‘Never show again’ ({n})")
+        btn.set_enabled(n > 0)
+
+    def _clear_hidden_listings(self):
+        """'Clear all' (Locks tab): un-hide every 'Never show again' listing
+        after a confirm, and refresh the results view so they reappear."""
+        try:
+            n = hidden_count()
+        except Exception:
+            n = 0
+        if not n:
+            self.status.set("Nothing is hidden — all results already show.")
+            return
+        if not messagebox.askyesno(
+                "Clear all ‘Never show again’",
+                f"Show {n} hidden listing{'' if n == 1 else 's'} again "
+                f"everywhere (results view and exports)?"):
+            return
+        try:
+            cleared = clear_hidden()
+        except sqlite3.Error as ex:
+            messagebox.showerror(
+                "Clear all", f"Couldn't clear the hidden list: {ex}")
+            return
+        self._sync_hidden_button()
+        self._refresh_table()
+        self.status.set(
+            f"Cleared — {cleared} listing{'' if cleared == 1 else 's'} "
+            f"will show again.")
 
 
 
