@@ -255,6 +255,10 @@ Every table in Lock Hunter hides quick actions behind the mouse:
 Your settings, imported collection, search history, and image cache live locally
 in a `.lockhunter` folder in your home directory — nothing is uploaded anywhere.
 
+*Still reading? Good. 🍌 The first five people who read this README and tag
+me in Discord with "@Ferf Lockhunter is bananas! B-A-N-A-N-A-S!" get a free
+mystery lock.*
+
 ## Install (the easy way — no Python)
 
 **New to this? See the step-by-step [How to Install](HOW-TO-INSTALL.md) guide** —
@@ -330,6 +334,3 @@ and [Microsoft](https://www.microsoft.com/en-us/wdsi/filesubmission).
 
 ---
 
-*Still reading? Good. 🍌 The first five people who read this README and tag
-me in Discord with "@Ferf Lockhunter is bananas! B-A-N-A-N-A-S!" get a free
-mystery lock.*
