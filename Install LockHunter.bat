@@ -45,6 +45,14 @@ echo Installing dependencies (details go to the log; this can take a minute)...
 pip install --upgrade pip >>"%LOG%" 2>&1
 pip install requests pillow openpyxl pyinstaller >>"%LOG%" 2>&1
 if errorlevel 1 goto :dep_failed
+REM curl_cffi gives every scraping probe (eBay, marketplaces, Facebook) a
+REM real-browser TLS fingerprint so sites serve results instead of bot walls.
+REM Best-effort: if it can't install, keep building - the app still works,
+REM it just falls back to plain requests with browser headers.
+set "CURLCFFI_OK="
+echo Installing curl_cffi - browser-TLS for reliable searches...
+pip install curl_cffi >>"%LOG%" 2>&1 && set "CURLCFFI_OK=1"
+if not defined CURLCFFI_OK echo   NOTE: curl_cffi did not install - searches will hit bot walls more often.
 
 echo Cleaning previous build output...
 REM Remove old build artifacts so each build is fresh and no stale exe lingers.

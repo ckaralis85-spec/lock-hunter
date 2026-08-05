@@ -66,27 +66,48 @@ re-search**:
 
 Two things the table now does automatically:
 
-- **Deal score** — a listing is marked **✓ deal** (and turns green) when its
-  price is at or below 80% of the median price seen for that lock across your
-  search history, so genuine bargains stand out. It only kicks in once there's
-  enough price history for a lock to judge.
+- **Price value ("✓ deal")** — every search you run quietly files each
+  listing's price into a local price history. Once a lock has been sighted
+  with a readable price at least **4 times**, Lock Hunter knows its going
+  rate: a new listing at or below **80% of the median** of everything you've
+  seen for that lock is marked **✓ deal** and turns green. Prices are
+  normalized to USD first, so a euro bargain and a dollar bargain are judged
+  on the same scale, and junk (keys-only, parts-only, wrong-item listings)
+  is kept out of the history so the median stays honest. **It builds over
+  time**: a fresh install flags nothing, because it refuses to call
+  something a deal without evidence — the more you hunt, the sharper it
+  gets. Wipe-proof too: the history survives "Clear results".
 - **Foreign-title glossary** — foreign listing titles get a compact English
   gloss of common lock/condition terms appended in brackets (e.g. *… · [padlock,
   used, with key]*), so international results are readable at a glance. It's a
   display aid only and never changes what's stored or filtered.
 
-Hover a row to preview the listing's photo; double-click to open it; click any
-column header to sort. Set your **country** on the Search tab and eBay's own API
-results are pre-narrowed to items that deliver there. The Excel export honors all
-the on-screen filters, so it matches exactly what you see.
+**Mouse tricks most people miss:** hover a row to preview the listing's
+photo; **double-click opens the listing** in your browser; click any column
+header to sort. **Right-click a row** (or Ctrl/Shift-click several first)
+for: **Open listing**, **Copy link**, **Remove from results** (gone until a
+future scan re-finds it), and **Never show again** — which hides those
+exact listings from every future scan and export until you press **Clear
+all 'Never show again'** at the top of the Locks tab. The Delete key does
+the same as Remove. Set your **country** on the Search tab and eBay's own API
+results are pre-narrowed to items that deliver there. The Excel export honors
+all the on-screen filters — including your hidden listings — so it matches
+exactly what you see.
 
 ### Full belt catalog (Locks tab)
 
 The complete catalog with photos, Black 1–5 sub-tiers, and a **Rarity** column
 of stars based on how many LPU members own each lock (5★ extremely rare → 1★ very
-common), all sortable. Switch between **All locks**, **Locks I own**, and **My
-wishlist**, filter by belt, and search by name. **Update profile** imports your
-Owned and Wishlist locks straight from your lpubelts.com profile.
+common), all sortable. Switch between **All locks**, **Locks I own**, **My
+wishlist**, and **My priorities**, filter by belt, and search by name.
+**Update profile** imports your Owned and Wishlist locks straight from your
+lpubelts.com profile.
+
+Here too the mouse does more than most people realise: **click** a lock to
+preview its photo, **double-click** to open its LPU page, and
+**right-click** (one lock or a Ctrl/Shift-picked group) for **Search for
+"\<name\>"** — a full live hunt straight from the catalog — **Hunt the N
+selected locks**, and **★ Mark as priority** / remove priority.
 
 ### Priority locks
 
@@ -135,6 +156,13 @@ Bazaar, no API credits) across a whole list of locks in one run:
   where hunting your own locks is clearly the point). Also available from the
   right-click menu when several rows are picked. Batch hunts never disturb the
   wishlist's "only new" baseline.
+- **The priority hunt** — the fourth way, and the one built for daily use:
+  right-click the locks you're actively chasing and **Mark as priority**
+  (add off-catalog ones through the "Not on LPU?" box), then set **Show: My
+  priorities** and press **Hunt these locks** — one click sweeps your whole
+  chase list, owned or not. In the results, priority locks come back **blue
+  and pinned to the top**, so the hunt's most important finds are the first
+  rows you see.
 
   **The button always states its scope** — it reads *Hunt all 43 shown* when
   nothing is picked and *Hunt 3 picked* when rows are, and the count is the
@@ -169,7 +197,12 @@ your data, so it always reflects your current collection.
 ### Compare tab
 
 Paste any collector's lpubelts.com profile link for a two-way trade check: what
-they own that's on your wishlist, and what you own that's on theirs.
+they own that's on your wishlist, and what you own that's on theirs. Don't have
+their link? **LPU profile search** (top right) opens the LPU locks leaderboard —
+find the collector there, open their profile, and copy the URL.
+**Double-click any lock in the comparison — or right-click → Open LPU page —**
+to jump straight to that lock on lpubelts.com while you weigh the trade.
+Export the comparison as Excel or CSV, or copy it to the clipboard.
 
 ### Owners tab
 
@@ -179,6 +212,24 @@ Search a lock to see which LPU collectors own it, or use:
   wishlist.
 - **Top Bazaar sellers** — the Lock Bazaar sellers who currently have the most
   of your wishlist listed for sale.
+
+The owner rows are live, and this is the part almost nobody finds on their
+own: **right-click any collector** for **Compare trades with them** — it
+runs the full two-way Compare against their profile without you hunting
+down their link — and **Open their LPU profile**. **Double-click** a row
+opens the collector's profile too.
+
+### The right-click / double-click cheat sheet
+
+Every table in Lock Hunter hides quick actions behind the mouse:
+
+| Where | Right-click gives you | Double-click does |
+|---|---|---|
+| **Search** results | Open listing · Copy link · Remove from results · **Never show again** (multi-select works) | Opens the listing |
+| **Locks** table | Search for "\<name\>" · Hunt the selected locks · ★ Mark / un-mark priority | Opens the lock's LPU page |
+| **Collection → Hunt next** | — | Jumps straight into a search for that lock |
+| **Compare** results | Open LPU page | Opens the lock's LPU page |
+| **Owners** list | Compare trades with that collector · Open their LPU profile | Opens their LPU profile |
 
 ### More
 
@@ -194,8 +245,12 @@ Search a lock to see which LPU collectors own it, or use:
   startup (≈2 MB / ≈200 MB), so months of hunting never silently eat disk.
 - **Optional AI web search** (off by default) — can also ask an Anthropic
   (Claude) model to web-search for a lock. This is **not free**: it uses **your
-  own** Anthropic API key and costs a small amount of API credit per run (usually
-  a few US cents). The normal search is completely free.
+  own** Anthropic API key and costs a small amount of API credit per run. The
+  normal search is completely free.
+- **Help** (bottom bar) — builds a full diagnostic report, copies it to your
+  clipboard, and opens a pre-filled GitHub issue page in your browser: describe
+  the problem, press Ctrl+V to paste the report, submit. Nothing is sent
+  anywhere until you post the issue yourself.
 
 Your settings, imported collection, search history, and image cache live locally
 in a `.lockhunter` folder in your home directory — nothing is uploaded anywhere.
@@ -272,3 +327,9 @@ What you can do:
 If your scanner still flags it, it can be reported as a false positive to
 [Google Safe Browsing](https://safebrowsing.google.com/safebrowsing/report_error/)
 and [Microsoft](https://www.microsoft.com/en-us/wdsi/filesubmission).
+
+---
+
+*Still reading? Good. 🍌 The first five people who read this README and tag
+me in Discord with "@Ferf Lockhunter is bananas! B-A-N-A-N-A-S!" get a free
+mystery lock.*

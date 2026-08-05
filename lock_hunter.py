@@ -14,7 +14,7 @@ Dev run: python lock_hunter.py
 # and MINOR only run 1-9. So the sequence rolls over like this:
 #   ... 3.1.8 -> 3.1.9 -> 3.2.1 -> 3.2.2 ... 3.9.9 -> 4.1.1 -> 4.1.2 ...
 # i.e. after x.N.9 go to x.(N+1).1, and after x.9.9 go to (x+1).1.1.
-VERSION = "5.1.3"
+VERSION = "6.0.1"
 
 
 
@@ -31,6 +31,10 @@ GITHUB_REPO = "ckaralis85-spec/lock-hunter"
 GITHUB_RELEASES_PAGE = "https://github.com/%s/releases/latest" % GITHUB_REPO
 GITHUB_LATEST_API = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
 GITHUB_ISSUES_URL = "https://github.com/%s/issues" % GITHUB_REPO
+# The LPU locks leaderboard — every listed collector in one place. The
+# Compare tab's "LPU profile search" button opens it so the user can find a
+# collector and copy their profile link to paste into the Compare box.
+LPU_LEADERBOARD_URL = "https://lpubelts.com/#/leaderboard/locks"
 
 _BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -634,7 +638,8 @@ _CATALOG_OVERRIDES = {
     'avocet abs / era professional cylinder / federal lock u-systems (ucf/uch/ucs/uus)-3100 / thirard federal s / thirard federal 2': ['Avocet ABS', 'ERA Professional Cylinder', 'Federal Lock U-systems 3100', 'Thirard Federal S', 'Thirard Federal 2'],
     'bison/hyt/lays/qlsy chain key lock': ['Bison Chain Key Lock', 'HYT Chain Key Lock', 'Lays Chain Key Lock', 'Qlsy Chain Key Lock'],
     'ccl sesamee 900 series': ['CCL Sesamee 900'],
-    'eagle "supr-security" (with shutter)': ['Eagle "Supr-Security"'],
+    'eagle "supr-security" (with shutter)': ['Eagle "Supr-Security"',
+                                             'Eagle Supr-Security'],
     'eclipse (any model)': ['Eclipse'],
     'evva gpi/als': ['EVVA GPI', 'EVVA ALS'],
     'generic/unknown 1 or 2 lever cabinet lock': ['1 Lever Cabinet lock', '2 lever cabinet lock'],
@@ -652,9 +657,62 @@ _CATALOG_OVERRIDES = {
     's&g 4544 / s&g 4440 series': ['S&G 4544', 'S&G 4440'],
     'schlage original commercial/residential': ['Schlage Original Commercial', 'Schlage Original Residential'],
     'wilka pr100 series / wilka th6 / wilka si6': ['Wilka PR100', 'Wilka TH6', 'Wilka SI6'],
-    'yale y110 series brass padlock': ['Yale Y110 brass padlock'],
-    'yale y120 series brass padlock': ['Yale Y120 brass padlock'],
+    'yale y110 series brass padlock': ['Yale Y110'],
+    'yale y120 series brass padlock': ['Yale Y120'],
     'yuema 750 series / forte enigma': ['Yuema 750', 'Forte Enigma'],
+    # ---- Ferf's slash-name review (decision spreadsheet, 2026-08-04) ----
+    # Boda 428/429 is TWO sibling models, not a size: the automatic splitter
+    # keeps number/number pairs whole (right for ABUS 83/45), so sellers
+    # listing a single "Boda 428" were invisible. Search all three forms.
+    'boda 428/429': ['Boda 428/429', 'Boda 428', 'Boda 429'],
+    # The parenthetical made the as-written query unmatchable (every word,
+    # including "(Lock Out Tag Out)", had to appear). Ferf's chosen term:
+    'abus brady 71/40 loto (lock out tag out)': ['ABUS Brady 71/40'],
+    # ---- Ferf's custom-term review, round 2 (2026-08-05) — his exact
+    # search terms per catalog entry. Note S32: the catalog joins Master
+    # Lock LOTO 406 into the same entry, so the 406 terms are kept
+    # alongside his S32 pair (flagged to him; trim if unwanted).
+    'brinks r60 disk lock / brinks r70 disk lock / brinks r80 disk lock':
+        ['Brinks R60', 'Brinks R70', 'Brinks R80'],
+    'garrison 40mm brass padlock': ['Garrison padlock'],
+    'mailboss "12" wafer mailbox camlock': ['Mailboss mailbox lock'],
+    'master lock 1921d "100 anniversary" padlock': ['Master Lock 1921D'],
+    'schlage original f-series kik with collapsible bible':
+        ['Schlage F-series'],
+    'trelock euro cylinder': ['Trelock Cylinder'],
+    'bks 51 (livius) / bks 51-sl (livius)':
+        ['BKS 51', 'BKS 51-SL', 'BKS 51 Livius'],
+    'chateau c970 disk padlock': ['Chateau C970'],
+    'master lock 410 loto (lockout tagout)':
+        ['Master Lock 410', 'Master Lock 410 LOTO'],
+    'master lock s32 loto (lockout tagout) / master lock loto 406':
+        ['Master Lock S32', 'Master Lock S32 LOTO',
+         'Master Lock 406', 'Master Lock 406 LOTO'],
+    'solon super-lock company nix pix':
+        ['Solon Super-Lock Company Nix Pix', 'Nix Pix'],
+    'alpha z cam lock': ['Alpha Z lock', 'Alpha Z cam lock'],
+    'fab 3* profi / fab 4* profi':
+        ['FAB 3* Pro', 'FAB 3 Pro', 'FAB 4 Pro', 'FAB 4* Pro'],
+    'gege pextra / alfa "pextra"': ['Gege pExtra', 'Gege Alfa pExtra'],
+    'kwikset smartkey (gen iii)': ['Kwikset Smartkey'],
+    'kwikset smartkey (gens i & ii)': ['Kwikset Smartkey'],
+    'liquidonics miracle magnetic':
+        ['Liquidonics Miracle Magnetic', 'Miracle Magnetic'],
+    'australian lock co. galaxy':
+        ['Australian Lock Co. Galaxy', 'Galaxy lock'],
+    'eagle "supr-security"': ['Eagle "Supr-Security"', 'Eagle Supr-Security'],
+    'fichet-bauche monopole': ['Fichet-Bauche Monopole', 'Fichet Monopole'],
+    'ikon tk5 sperwellenprofil': ['IKON tk5 sperwellenprofil', 'IKON TK5'],
+    'robur 2391 safe deposit lock':
+        ['Robur 2391 Safe Deposit Lock', 'Robur 2391'],
+    'ikon sk6 sperrwelleprofil': ['IKON SK6 Sperrwelleprofil', 'IKON SK6'],
+    'fichet-bauche m2b / fichet-bauche m3b':
+        ['Fichet-Bauche M2B', 'Fichet-Bauche M3B',
+         'Fichet Bauche M2B', 'Fichet Bauche M3B'],
+    'urbanalps stealth key sk1':
+        ['UrbanAlps Stealth Key SK1', 'UrbanAlps Stealth Key'],
+    'a.s.i. inc. royal guardian':
+        ['A.S.I. Inc. Royal Guardian', 'Royal Guardian'],
 }
 
 
@@ -1034,12 +1092,34 @@ def _ebay_get(sess, url, dom):
         "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
     }
-    r = sess.get(url, headers=hdrs, timeout=_FB_TIMEOUT)
-    st = getattr(r, "status_code", 0) or 0
+    # The contract is (status, text), never raise — the retry below was
+    # already guarded; guard the FIRST request too so a first-call network
+    # drop returns (0, "") like any other miss instead of propagating.
     try:
-        text = r.text or ""
+        r = sess.get(url, headers=hdrs, timeout=_FB_TIMEOUT)
+        st = getattr(r, "status_code", 0) or 0
+        try:
+            text = r.text or ""
+        except Exception:
+            text = ""
     except Exception:
-        text = ""
+        return 0, ""
+    # N2 (Roadmap v6): eBay's bot wall throws the occasional one-off 503/429
+    # (measured: 6 in 9,834 pages over 3.5 days). ONE polite retry after a
+    # short pause recovers those without hammering a genuinely angry wall —
+    # a second refusal is accepted as final.
+    if st in (503, 429):
+        _log_diag(f"eBay {dom}: HTTP {st} — retrying once after a pause")
+        time.sleep(2.5)
+        try:
+            r = sess.get(url, headers=hdrs, timeout=_FB_TIMEOUT)
+            st = getattr(r, "status_code", 0) or 0
+            try:
+                text = r.text or ""
+            except Exception:
+                text = ""
+        except Exception:
+            pass          # keep the first response's verdict
     return st, text
 
 
@@ -8574,9 +8654,9 @@ class LockHunter(tk.Tk):
         upd.pack(side="right")
         upd.bind("<Button-1>", lambda _e: self._check_for_updates())
 
-        # Help: builds a diagnostic report and opens the user's email client
-        # with a pre-addressed draft (they add their message; the short log is
-        # already in the body, the full report saved to a file to attach).
+        # Help: builds a diagnostic report, copies it to the clipboard, and
+        # opens a pre-filled GitHub issue page (the report pastes with Ctrl+V;
+        # the full report is also saved to a file as a fallback).
         hlp = tk.Label(statusbar, text="Help", bg=self.C_PANEL2,
                        fg=self.C_ACCENT, font=("Segoe UI", 9, "underline"),
                        cursor="hand2", pady=7)
@@ -9039,12 +9119,25 @@ class LockHunter(tk.Tk):
         card, body = self._card(pad, "COMPARE COLLECTIONS")
         card.pack(fill="both", expand=True)
 
+        # Description on the left, "LPU profile search" on the right — the
+        # helper button lives up HERE because the entry row below is already
+        # full at the 900px minimum window width (measured: 833px of 842px
+        # used) and packing it there clipped it, exactly like the hunt
+        # buttons once clipped on the Locks tab.
+        desc = tk.Frame(body, bg=self.C_PANEL)
+        desc.pack(fill="x", pady=(0, 10))
         tk.Label(
-            body,
+            desc,
             text=("Enter someone else's LPU profile link to see which locks "
                   "they own that are on your wishlist."),
             bg=self.C_PANEL, fg=self.C_MUTE, font=("Segoe UI", 10),
-            justify="left", wraplength=780).pack(anchor="w", pady=(0, 10))
+            justify="left", wraplength=620).pack(side="left", anchor="w")
+        # Where to FIND a profile link to paste: the LPU locks leaderboard
+        # lists every collector — open it, click a name, copy the URL.
+        self.compare_lpu_btn = FlatButton(
+            desc, "LPU profile search",
+            command=lambda: open_url(LPU_LEADERBOARD_URL), kind="outline")
+        self.compare_lpu_btn.pack(side="right")
 
         LF = ("Segoe UI", 10)
         ctrl = tk.Frame(body, bg=self.C_PANEL)
@@ -12642,10 +12735,11 @@ class LockHunter(tk.Tk):
 
     def _open_help_email(self):
         """Generate a diagnostic report, COPY the complete report text to the
-        clipboard, and open a pre-addressed Gmail draft; the user describes
+        clipboard, and open a pre-filled GitHub issue page; the user describes
         the problem and just presses Ctrl+V to paste the full report (a URL
         can't safely carry the whole log, and the app can't type into the
-        browser, so the clipboard bridges the gap)."""
+        browser, so the clipboard bridges the gap). Name kept for history —
+        it stopped drafting emails when reporting moved to GitHub."""
         try:
             subject, body, full_path = build_help_report()
         except Exception as ex:

@@ -8,7 +8,7 @@ around the official LPU (Lockpickers United) belt catalog from
 lpubelts.com.
 
 ------------------------------------------------------------
- DISCLAIMER  (placeholder - to be finalised)
+ DISCLAIMER
 ------------------------------------------------------------
 
 Lock Hunter is a personal, hobbyist tool provided "as is",
@@ -23,8 +23,6 @@ service of each website it accesses and with any applicable
 laws in your location. Use it respectfully: don't hammer
 sites, and stop if a site asks you to. The author accepts no
 liability for how the tool is used.
-
-(This wording is a starting point and will be refined.)
 
 ------------------------------------------------------------
  OPEN SOURCE
@@ -54,7 +52,15 @@ source directly with Python (see "FOR THE DEVELOPER" below).
 * Tracks YOUR collection: Owned and Wishlist, imported
   automatically from your lpubelts.com profile.
 * One-click "Search for Wishlist Locks" - hunts every lock on
-  your wishlist in a single run.
+  your wishlist in a single run. Or flag locks as PRIORITY
+  (right-click them on the Locks tab) and hunt just your
+  chase list - priority finds come back blue, pinned to the
+  top of the results.
+* A "price value" flag that learns over time: every search
+  files prices into a local history, and once a lock has been
+  seen at least 4 times, any listing at or below 80% of its
+  median price gets a green "deal" mark. Fresh installs flag
+  nothing yet - it needs your hunts to build the evidence.
 * Compare tab - paste any collector's profile link for a full
   TWO-WAY trade check: which locks they own that are on your
   wishlist, and which locks you own that are on theirs.
@@ -65,8 +71,8 @@ source directly with Python (see "FOR THE DEVELOPER" below).
 * OPTIONAL AI web search (off by default): can also ask an
   Anthropic (Claude) AI model to web-search for a lock. This is
   NOT free - it uses YOUR own Anthropic API key and costs a small
-  amount of API credit per run (usually a few US cents). The
-  normal search is completely free.
+  amount of API credit per run. The normal search is completely
+  free.
 
 
 ------------------------------------------------------------
@@ -140,7 +146,8 @@ SEARCH - the main hunt screen.
   * Lock results only - filters out same-name items that are
     NOT locks (sunglasses, games, etc). Leave this ON; turn it
     off only if you think it hid something real.
-  * Extended search - slower but more thorough.
+  (The old "Extended search" checkbox is gone - the deeper,
+  more thorough sweep is now simply always on.)
 
   Above the results you can filter them, hide non-shippable
   results, show a USD estimate next to foreign prices, clear
@@ -151,12 +158,20 @@ SEARCH - the main hunt screen.
   catalog" (refresh the lock list) and an "Enter/Change API
   key" link.
 
+  RIGHT-CLICK a result row (Ctrl/Shift-click picks several)
+  for: Open listing, Copy link, Remove from results (gone
+  until a future scan re-finds it), and NEVER SHOW AGAIN -
+  which hides those exact listings from every future scan and
+  export until you press "Clear all 'Never show again'" at
+  the top of the Locks tab. The Delete key = Remove. Hover a
+  row for its photo; DOUBLE-CLICK opens the listing.
+
 LOCKS - the full catalog and your collection.
 
-  Filter with Show (All locks / Locks I own / My wishlist),
-  Belt, and the Find box. Click a lock to see its photo -
-  photos come straight from the catalog, so they appear
-  instantly. Double-click opens its LPU page.
+  Filter with Show (All locks / Locks I own / My wishlist /
+  My priorities), Belt, and the Find box. Click a lock to see
+  its photo - photos come straight from the catalog, so they
+  appear instantly. Double-click opens its LPU page.
 
   The Rarity column shows stars for how rare a lock is, based
   on how many LPU members own it (5 stars = rarest, 1 star =
@@ -165,8 +180,12 @@ LOCKS - the full catalog and your collection.
 
   The Owned and Wishlist columns show your collection; use
   "Update profile" to re-import it after you change things on
-  lpubelts.com. Right-click any lock for quick actions: Search
-  for "<name>", Open LPU page.
+  lpubelts.com. RIGHT-CLICK any lock (or a Ctrl/Shift-picked
+  group) for the quick actions most people never find:
+  Search for "<name>" (a full live hunt straight from the
+  catalog), Hunt the N selected locks, and Mark / un-mark as
+  PRIORITY. Locks that aren't in the LPU catalog at all can
+  join your priority list through the "Not on LPU?" box.
 
   With Show set to "My wishlist", the "Search for Wishlist
   Locks" button lights up: it live-searches EVERY lock on your
@@ -182,6 +201,29 @@ COMPARE - a two-way trade check with any collector.
   wishlist - everything you need to build a trade offer, with
   belts (including Black tiers). Save as CSV / Excel or Copy
   to clipboard; exports include a "Who has it" column.
+  DOUBLE-CLICK any lock in the comparison (or right-click ->
+  Open LPU page) to see that lock on lpubelts.com while you
+  weigh the trade. Don't have someone's link? "LPU profile
+  search" (top right) opens the LPU locks leaderboard - find
+  the collector, open their profile, copy the URL.
+
+COLLECTION - your collection at a glance, offline.
+
+  Belt-by-belt completion bars in LPU colours, your rarest
+  owned and rarest missing, and "Hunt next" - your wishlist
+  ranked by how gettable each lock is from your own search
+  history. DOUBLE-CLICK a Hunt-next row to jump straight into
+  a live search for that lock.
+
+OWNERS - who owns a lock, and your best trade partners.
+
+  Search any lock to see which LPU collectors own it, plus
+  "Top wishlist owners" (who owns most of YOUR wishlist) and
+  "Top Bazaar sellers". The rows are live - and this is the
+  bit almost nobody finds: RIGHT-CLICK a collector for
+  "Compare trades with them" (runs the full two-way Compare
+  without hunting down their profile link) or "Open their LPU
+  profile". DOUBLE-CLICK opens their profile too.
 
 
 ------------------------------------------------------------
@@ -191,10 +233,22 @@ COMPARE - a two-way trade check with any collector.
 1. Single lock, live: Search tab, pick or type the lock,
    press "Search live".
 2. Whole wishlist at once: Locks tab, set Show to "My
-   wishlist", press "Search for Wishlist Locks".
-3. Straight from the catalog: Locks tab, right-click a lock,
+   wishlist", press "Search for Wishlist Locks" ("Only new
+   searches" repeats it but shows only what's new since last
+   time).
+3. THE PRIORITY HUNT - your daily driver: right-click the
+   locks you're actively chasing -> "Mark as priority" (add
+   off-catalog locks via the "Not on LPU?" box), then set
+   Show to "My priorities" and press "Hunt these locks". One
+   click sweeps your whole chase list - owned or not - and
+   priority finds come back BLUE, pinned to the top of the
+   results.
+4. Any set of locks: pick rows with Ctrl/Shift-click (any
+   view, any belt filter) and press "Hunt these locks" - the
+   button always states its real scope.
+5. Straight from the catalog: Locks tab, right-click a lock,
    Search for "<name>".
-4. Compare a collector: Compare tab with their profile link -
+6. Compare a collector: Compare tab with their profile link -
    two-way, so you see what to offer them back.
 
 
@@ -211,8 +265,11 @@ touches your collection.
 
 * App crash: a crash_log.txt is written in the folder above -
   send it to Ferf. You can also click "Help" at the bottom of
-  the window, which drafts an email to Ferf with the details
-  already filled in.
+  the window: it builds a full diagnostic report, copies it
+  to your clipboard, and opens a pre-filled GitHub issue page
+  in your browser - describe the problem, press Ctrl+V to
+  paste the report, and submit. Nothing is sent until you
+  post the issue yourself.
 * Black locks show plain "Black" instead of Black 1-5, photos
   or owner counts are missing, or a lock is missing: press
   "Update LPU catalog" (Search tab toolbar) once.
@@ -247,3 +304,8 @@ Both need Python on the BUILD machine; neither is needed by
 the people you give LockHunter.exe to.
 
 Happy hunting!
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Still reading? Good. The first five people who read this
+README and tag me in Discord with "@Ferf Lockhunter is
+bananas! B-A-N-A-N-A-S!" get a free mystery lock.
